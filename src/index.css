@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+/* Palette "orange" de Tailwind redéfinie avec le vert du logo I.P & D Sarl.
+   Comme toute l'interface utilise déjà les classes orange-* (boutons, menu actif,
+   badges...), cette redéfinition recolorie automatiquement l'app en vert sans
+   avoir à modifier chaque composant. Le orange d'origine (amber-*) reste utilisé
+   ponctuellement pour les encarts d'avertissement. */
+@theme {
+  --color-orange-50: #f4fbf5;
+  --color-orange-100: #e4f6e7;
+  --color-orange-200: #c6eccb;
+  --color-orange-300: #9cdea4;
+  --color-orange-400: #66cc74;
+  --color-orange-500: #3cb44c;
+  --color-orange-600: #31933e;
+  --color-orange-700: #297a34;
+  --color-orange-800: #21632a;
+  --color-orange-900: #194d20;
+  --color-orange-950: #123617;
+}

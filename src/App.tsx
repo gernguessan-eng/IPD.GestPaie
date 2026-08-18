@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
 import logo from './assets/logo.jpg';
@@ -1776,6 +1776,18 @@ const JOURS_OUVRES_MOIS = 22;
 // fonction des jours réellement travaillés saisis dans "Présences".
 const JOURS_MOIS_PAIE = 30;
 
+// Garde-fou global : un employé créé/importé avec des données de salaire incomplètes ou
+// manquantes (ex. document Firestore partiellement écrit par un ancien formulaire) ne doit
+// JAMAIS faire planter une page entière — on retombe sur des rubriques à 0 plutôt que de
+// lever une exception. Utilisé partout où "emp.components" est lu dans les calculs de paie.
+function getComponents(emp: Employee): SalaryComponents {
+  return {
+    baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0,
+    responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0,
+    ...(emp.components || {}),
+  };
+}
+
 // Coordonnées employeur affichées sur le bulletin (onglet "MODE D'EMPLOI")
 const COMPANY_CNPS_EMPLOYEUR = '303134';
 const COMPANY_TAX_NUMBER = '1503094N';
@@ -1804,7 +1816,7 @@ type SocialDeductions = {
 };
 
 function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: number, absenceDeduction: number): SocialDeductions {
-  const c = emp.components;
+  const c = getComponents(emp);
   const brutImposable = Math.max(0, brutImposableAvantAbsence - absenceDeduction);
   const brutNonImposable = c.primeFonctionNonImposable || 0;
   const totalBrut = brutImposable + brutNonImposable;
@@ -1842,7 +1854,10 @@ type PayrollRow = {
 // hasData = true si au moins une présence a été saisie sur la période (sinon le calcul
 // retombe par défaut sur le salaire de base, comme si l'employé avait été présent).
 function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, periodEnd: string) {
-  const c = emp.components;
+  // Garde-fou : un employé créé/importé avec des données de salaire incomplètes ou
+  // manquantes (ex. document Firestore partiellement écrit) ne doit jamais faire planter
+  // toute l'application — on retombe sur des valeurs à 0 plutôt que de lever une exception.
+  const c = getComponents(emp);
 
   const empPresences = presences.filter(p =>
     p.employeeId === emp.id && p.date >= periodStart && p.date <= periodEnd);
@@ -1948,7 +1963,7 @@ function PaySlipRow({ code, label, base, taux, gain, retenue }: {
 // transport non imposable, charges patronales indicatives, signatures).
 function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRow; periodStart: string; periodEnd: string; onClose: () => void; }) {
   const { emp, ot, netToPay, absNonJust, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
-  const c = emp.components;
+  const c = getComponents(emp);
   const isCadre = emp.professionalStatus === 'Cadre';
 
   const { brutImposable, totalBrut, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer } = social;
@@ -2171,8 +2186,8 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
     sursalaire: sum(r => r.sursalaireProrated),
     heureSuppl: sum(r => r.overtimePay),
     anciennete: sum(r => r.ancienneteAmount),
-    primeNonImp: sum(r => r.emp.components.primeFonctionNonImposable),
-    primeFonction: sum(r => r.emp.components.representation + r.emp.components.responsibility + r.emp.components.housing + r.emp.components.performance + r.emp.components.boisson + r.emp.components.other),
+    primeNonImp: sum(r => getComponents(r.emp).primeFonctionNonImposable),
+    primeFonction: sum(r => { const c = getComponents(r.emp); return c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other; }),
     totalBrut: sum(r => r.social.totalBrut),
     brutImposable: sum(r => r.social.brutImposable),
     brutSocial: sum(r => r.social.brutSocial),
@@ -2273,7 +2288,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
             <tbody className="divide-y divide-slate-100">
               {payroll.map((r, i) => {
                 const { emp, social, ancienneteAmount, ancienneteRatePct, netToPay } = r;
-                const c = emp.components;
+                const c = getComponents(emp);
                 const { months } = computeAncienneteRate(emp.startDate, periodEnd);
                 const primeFonction = c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other;
                 return (
@@ -2622,7 +2637,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
 // sur les 12 mois de l'année — chaque mois est calculé séparément à partir des
 // présences réellement saisies (mêmes fonctions que "Paie"), puis additionné.
 function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: string; label: string }[]) {
-  const c = emp.components;
+  const c = getComponents(emp);
   const acc = {
     baseSalary: 0, sursalaire: 0, overtimePay: 0, ancienneteAmount: 0, primeFonction: 0,
     totalBrut: 0, brutImposable: 0, brutSocial: 0,
@@ -3014,6 +3029,32 @@ export default function App() {
   return <AppShell />;
 }
 
+// Filet de sécurité : si UNE page plante (ex. donnée incomplète non prévue), elle seule
+// affiche un message d'erreur — le reste de l'application (menu, autres pages déjà ouvertes)
+// continue de fonctionner normalement, au lieu d'un écran blanc général.
+class PageErrorBoundary extends Component<
+  { pageName: string; children: any }, { error: Error | null }
+> {
+  constructor(props: { pageName: string; children: any }) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: any) { console.error(`Erreur dans la page "${this.props.pageName}" :`, error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
+          <p className="text-sm font-bold text-red-700 mb-1">Cette page a rencontré un problème et n'a pas pu s'afficher.</p>
+          <p className="text-xs text-red-600 mb-3">{this.state.error.message}</p>
+          <button onClick={() => this.setState({ error: null })}
+            className="px-4 py-2 text-xs font-semibold bg-red-600 text-white rounded-xl hover:bg-red-700">
+            Réessayer
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function AppShell() {
   const savedUi = loadUiState();
   const [page, setPage] = useState(savedUi?.page || 'dashboard');
@@ -3096,16 +3137,16 @@ function AppShell() {
           dans une page étaient perdus dès qu'on la quittait puis y revenait.
         */}
         <div className="p-4 lg:p-6 max-w-[1400px] mx-auto">
-          <div style={{ display: page === 'dashboard' ? 'block' : 'none' }}><DashboardPage filtered={filtered} /></div>
-          <div style={{ display: page === 'sites' ? 'block' : 'none' }}><SitesPage search={search} /></div>
-          <div style={{ display: page === 'employees' ? 'block' : 'none' }}><EmployeesPage filtered={filtered} /></div>
-          <div style={{ display: page === 'presence' ? 'block' : 'none' }}><PresencePage search={search} /></div>
-          <div style={{ display: page === 'leave' ? 'block' : 'none' }}><LeavePage filtered={filtered} /></div>
-          <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PayePage filtered={filtered} /></div>
-          <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><LivreFinAnneePage filtered={filtered} /></div>
-          <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></div>
-          <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></div>
-          <div style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></div>
+          <div style={{ display: page === 'dashboard' ? 'block' : 'none' }}><PageErrorBoundary pageName="Tableau de bord"><DashboardPage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'presence' ? 'block' : 'none' }}><PageErrorBoundary pageName="Présences"><PresencePage search={search} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'leave' ? 'block' : 'none' }}><PageErrorBoundary pageName="Congés"><LeavePage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
+          <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>
+          <div style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales annuelles"><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></PageErrorBoundary></div>
         </div>
       </main>
     </div>

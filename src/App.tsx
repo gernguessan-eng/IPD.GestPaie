@@ -125,20 +125,7 @@ function LoginPage({ onLogin }: { onLogin: (user: AuthUser) => void }) {
                 <img src={logo} alt="I.P & D Sarl" className="h-full w-full object-contain" />
               </div>
             </div>
-            <h1 className="text-3xl font-black text-white leading-tight mb-3">GarageRH</h1>
-            <p className="text-sm text-slate-300 leading-relaxed">
-              Accès sécurisé à l'application de gestion RH pour garage automobile.
-              Connectez-vous ou créez votre compte lors de la première utilisation.
-            </p>
-
-            {/* Encadré info */}
-            <div className="mt-8 rounded-xl border border-slate-600/50 bg-slate-700/30 p-4">
-              <p className="text-xs text-slate-300 leading-relaxed">
-                {forgotMode
-                  ? <><span className="font-bold text-white">Mot de passe oublié :</span> répondez à votre question de sécurité pour définir un nouveau mot de passe.</>
-                  : <><span className="font-bold text-white">Première utilisation :</span> créez votre compte avec un identifiant, un mot de passe et votre fonction. Aucun compte n'est pré-enregistré.</>}
-              </p>
-            </div>
+            <h1 className="text-3xl font-black text-white leading-tight mb-3">Gestion RH-Paie</h1>
           </div>
 
           {/* Pied */}
@@ -472,7 +459,7 @@ function Sidebar({
             <img src={logo} alt="I.P & D Sarl" className="h-full w-full object-contain" />
           </div>
           <div>
-            <h1 className="text-sm font-bold text-slate-800 leading-tight">GarageRH</h1>
+            <h1 className="text-sm font-bold text-slate-800 leading-tight">Gestion RH-Paie</h1>
             <p className="text-[10px] text-slate-400">Gestion RH · Côte d'Ivoire</p>
           </div>
           <button onClick={() => setMobileOpen(false)} className="ml-auto lg:hidden text-slate-400 hover:text-slate-600"><Ico name="close" size={18} /></button>
@@ -1781,8 +1768,13 @@ function LeavePage({ filtered }: { filtered: Employee[] }) {
 /* PAGE: PAIE                                              */
 /* ══════════════════════════════════════════════════════ */
 
-// Nombre moyen de jours ouvrés par mois (base légale de référence, retenue absences)
+// Nombre moyen de jours ouvrés par mois (base de calcul du taux horaire pour les heures sup.)
 const JOURS_OUVRES_MOIS = 22;
+// Convention de paie ivoirienne : le salaire mensuel (SALAIRE, SURSALAIRE) est réparti sur
+// 30 jours calendaires, comme l'indique l'onglet "ALI" du classeur Excel (colonne NOMBRE = 30,
+// gain = base × nombre/30). C'est cette base de 30 jours qui sert à proratiser la paie en
+// fonction des jours réellement travaillés saisis dans "Présences".
+const JOURS_MOIS_PAIE = 30;
 
 // Coordonnées employeur affichées sur le bulletin (onglet "MODE D'EMPLOI")
 const COMPANY_CNPS_EMPLOYEUR = '303134';
@@ -1837,7 +1829,8 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
 type PayrollRow = {
   emp: Employee; dailyRate: number; hourlyRate: number; absNonJust: number; absJust: number;
   heuresSup: number; ot: OvertimeHours; deduction: number; overtimePay: number; netToPay: number;
-  ancienneteAmount: number; ancienneteRatePct: number;
+  ancienneteAmount: number; ancienneteRatePct: number; joursPayes: number; joursNonPayes: number;
+  baseSalaryProrated: number; sursalaireProrated: number;
   social: SocialDeductions; hasData: boolean;
 };
 
@@ -1853,6 +1846,7 @@ function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, per
 
   const empPresences = presences.filter(p =>
     p.employeeId === emp.id && p.date >= periodStart && p.date <= periodEnd);
+  const hasData = empPresences.length > 0;
 
   const absNonJust = empPresences.filter(p => p.status === 'Absent' && p.justification === 'Non justifié').length;
   const absJust = empPresences.filter(p => p.status === 'Absent' && p.justification === 'Justifié').length;
@@ -1864,6 +1858,27 @@ function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, per
   });
   const heuresSup = ot.h15 + ot.h50 + ot.h75 + ot.h100 + ot.h200;
 
+  // Jours réellement PAYÉS sur la période : "Présent" (1 j), "Congé" (payé, durée saisie),
+  // "Maladie" justifiée (1 j, arrêt maladie payé), "Formation" (durée saisie, considérée comme
+  // du temps de travail). Les "Absent" (justifiées ou non) et les jours SANS AUCUNE saisie ne
+  // sont pas payés — c'est cette dernière règle qui fait la différence avec l'ancien calcul :
+  // un mois où seuls 3 jours de présence ont été pointés sur 30 n'est plus payé comme un mois
+  // complet. Si aucune présence n'a été saisie sur toute la période (mois non encore pointé),
+  // on ne pénalise pas l'employé et on retombe sur un mois complet (comportement par défaut).
+  let joursPayes = JOURS_MOIS_PAIE;
+  if (hasData) {
+    let jp = 0;
+    empPresences.forEach(p => {
+      if (p.status === 'Présent') jp += 1;
+      else if (p.status === 'Congé') jp += (p.duree ?? 1);
+      else if (p.status === 'Maladie' && p.justification === 'Justifié') jp += 1;
+      else if (p.status === 'Formation') jp += (p.duree ?? 1);
+      // 'Absent' (justifié ou non) et 'Non saisi' : 0 jour payé
+    });
+    joursPayes = Math.min(jp, JOURS_MOIS_PAIE);
+  }
+  const joursNonPayes = JOURS_MOIS_PAIE - joursPayes;
+
   // Prime d'ancienneté — calculée automatiquement à la date de fin de période, jamais saisie
   // manuellement (reproduit LIVRE DE PAIE!O:Q — voir computeAncienneteRate/Amount)
   const { ratePct: ancienneteRatePct } = computeAncienneteRate(emp.startDate, periodEnd);
@@ -1874,19 +1889,30 @@ function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, per
     OVERTIME_RATES.reduce((acc, r) => acc + ot[r.key] * hourlyRate * (1 + r.rate), 0)
   );
 
-  // Brut imposable avant déduction des absences : base + sursalaire + heures sup + ancienneté
-  // + prime de fonction imposable (représentation + responsabilité) + autres primes imposables
+  // Salaire de base et sursalaire proratisés sur les jours réellement payés (formule de
+  // l'onglet "ALI" : gain = base × nombre/30). Les autres primes (ancienneté, fonction,
+  // logement, transport...) restent à taux plein, non proratisées.
+  const baseSalaryProrated = Math.round(c.baseSalary * joursPayes / JOURS_MOIS_PAIE);
+  const sursalaireProrated = Math.round(c.sursalaire * joursPayes / JOURS_MOIS_PAIE);
+  const dailyRate = (c.baseSalary + c.sursalaire) / JOURS_MOIS_PAIE;
+  const deduction = (c.baseSalary + c.sursalaire) - (baseSalaryProrated + sursalaireProrated);
+
+  // Brut imposable avant déduction des jours non payés : base + sursalaire (à taux plein) +
+  // heures sup + ancienneté + prime de fonction imposable (représentation + responsabilité) +
+  // autres primes imposables — la déduction ci-dessus vient réduire ce total dans
+  // computeSocialDeductions, exactement comme fait le prorata directement sur base/sursalaire.
   const primeFonctionImposable = c.representation + c.responsibility;
   const autresPrimesImposables = c.housing + c.performance + c.boisson + c.other;
   const brutImposableAvantAbsence = c.baseSalary + c.sursalaire + overtimePay + ancienneteAmount + primeFonctionImposable + autresPrimesImposables;
 
-  const dailyRate = (brutImposableAvantAbsence + (c.primeFonctionNonImposable || 0)) / JOURS_OUVRES_MOIS;
-  const deduction = Math.round(absNonJust * dailyRate);
-
   const social = computeSocialDeductions(emp, brutImposableAvantAbsence, deduction);
   const netToPay = social.netAPayer;
 
-  return { dailyRate, hourlyRate, absNonJust, absJust, heuresSup, ot, deduction, overtimePay, netToPay, ancienneteAmount, ancienneteRatePct, social, hasData: empPresences.length > 0 };
+  return {
+    dailyRate, hourlyRate, absNonJust, absJust, heuresSup, ot, deduction, overtimePay, netToPay,
+    ancienneteAmount, ancienneteRatePct, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated,
+    social, hasData,
+  };
 }
 
 // Découpe une année/mois en bornes de dates calendaires [1er jour, dernier jour]
@@ -1921,7 +1947,7 @@ function PaySlipRow({ code, label, base, taux, gain, retenue }: {
 // rubriques avec codes, cotisations salariales détaillées, retenues fixes, indemnité de
 // transport non imposable, charges patronales indicatives, signatures).
 function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRow; periodStart: string; periodEnd: string; onClose: () => void; }) {
-  const { emp, ot, deduction, overtimePay, netToPay, absNonJust, ancienneteAmount, ancienneteRatePct, social } = row;
+  const { emp, ot, netToPay, absNonJust, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
   const c = emp.components;
   const isCadre = emp.professionalStatus === 'Cadre';
 
@@ -1996,6 +2022,19 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
               <div className="flex justify-between"><span className="text-slate-500">Chef de famille :</span><span className="font-semibold text-slate-700">{emp.chefDeFamille ? 'Oui' : 'Non'}</span></div>
             </div>
 
+            {/* Bandeau jours payés — reflète les présences réellement saisies sur la période */}
+            {hasData && joursNonPayes > 0 && (
+              <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-[10px] text-amber-800">
+                ⚠ Paie calculée sur <b>{joursPayes} jour(s) payé(s) sur {JOURS_MOIS_PAIE}</b> d'après les présences saisies
+                {absNonJust > 0 ? ` (dont ${absNonJust} j d'absence non justifiée)` : ''} — {joursNonPayes} j non travaillé(s)/non pointé(s) non rémunéré(s).
+              </div>
+            )}
+            {!hasData && (
+              <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500">
+                ℹ Aucune présence saisie sur cette période dans le module "Présences" — paie calculée sur un mois complet ({JOURS_MOIS_PAIE} j) par défaut.
+              </div>
+            )}
+
             {/* Tableau gains / retenues */}
             <table className="w-full">
               <thead>
@@ -2009,8 +2048,8 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 </tr>
               </thead>
               <tbody>
-                <PaySlipRow code="10" label="SALAIRE" base={c.baseSalary} taux="30 j" gain={c.baseSalary} />
-                {c.sursalaire > 0 && <PaySlipRow code="11" label="SURSALAIRE" base={c.sursalaire} taux="30 j" gain={c.sursalaire} />}
+                <PaySlipRow code="10" label="SALAIRE" base={c.baseSalary} taux={`${joursPayes} j`} gain={baseSalaryProrated} />
+                {c.sursalaire > 0 && <PaySlipRow code="11" label="SURSALAIRE" base={c.sursalaire} taux={`${joursPayes} j`} gain={sursalaireProrated} />}
                 {ancienneteAmount > 0 && <PaySlipRow code="15" label="PRIME ANCIENNETÉ" base={c.baseSalary} taux={`${ancienneteRatePct}%`} gain={ancienneteAmount} />}
                 {primeFonctionImposable > 0 && <PaySlipRow code="20" label="PRIME DE FONCTION" base={primeFonctionImposable} gain={primeFonctionImposable} />}
                 {c.primeFonctionNonImposable > 0 && <PaySlipRow code="21" label="PRIME DE FONCTION NON IMPOSABLE" base={c.primeFonctionNonImposable} gain={c.primeFonctionNonImposable} />}
@@ -2024,9 +2063,6 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                   <PaySlipRow key={r.key} code="12" label={`HEURE SUPPLÉMENTAIRE +${r.label}`}
                     taux={`${ot[r.key]} h`} gain={Math.round(ot[r.key] * row.hourlyRate * (1 + r.rate))} />
                 ))}
-
-                {/* Absences non justifiées (retenue) */}
-                {deduction > 0 && <PaySlipRow code="90" label={`RETENUE ABSENCE(S) NON JUSTIFIÉE(S) (${absNonJust} j)`} taux={`${absNonJust} j`} retenue={deduction} />}
 
                 <tr className="bg-slate-50 font-bold border-y border-slate-200">
                   <td colSpan={4} className="px-2 py-1.5 text-[11px] text-slate-700">TOTAL BRUT</td>
@@ -2131,8 +2167,8 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   // Totaux — équivalent de la ligne "TOTAUX" (LIVRE DE PAIE!33)
   const sum = (fn: (r: typeof payroll[number]) => number) => payroll.reduce((a, r) => a + fn(r), 0);
   const T = {
-    base: sum(r => r.emp.components.baseSalary),
-    sursalaire: sum(r => r.emp.components.sursalaire),
+    base: sum(r => r.baseSalaryProrated),
+    sursalaire: sum(r => r.sursalaireProrated),
     heureSuppl: sum(r => r.overtimePay),
     anciennete: sum(r => r.ancienneteAmount),
     primeNonImp: sum(r => r.emp.components.primeFonctionNonImposable),
@@ -2208,6 +2244,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Matricule</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="D'après les présences saisies dans le module Présences">Jours payés</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Sursalaire</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Heure suppl.</th>
@@ -2245,8 +2282,12 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                     <td className="px-2.5 py-2 text-[11px] text-slate-600 whitespace-nowrap">{emp.matricule || '—'}</td>
                     <td className="px-2.5 py-2 text-[11px] font-semibold text-slate-700 whitespace-nowrap">{emp.lastName}</td>
                     <td className="px-2.5 py-2 text-[11px] text-slate-700 whitespace-nowrap">{emp.firstName}</td>
-                    <LP_Td value={c.baseSalary} />
-                    <LP_Td value={c.sursalaire} />
+                    <td className="px-2.5 py-2 text-[11px] text-center whitespace-nowrap">
+                      <span className={cn('font-semibold', r.joursNonPayes > 0 && r.hasData ? 'text-amber-600' : 'text-slate-500')}>{r.joursPayes} j</span>
+                      <span className="text-slate-300"> / {JOURS_MOIS_PAIE}</span>
+                    </td>
+                    <LP_Td value={r.baseSalaryProrated} />
+                    <LP_Td value={r.sursalaireProrated} />
                     <LP_Td value={r.overtimePay} />
                     <LP_Td value={ancienneteAmount} />
                     <LP_Td value={c.primeFonctionNonImposable} />
@@ -2271,11 +2312,11 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                   </tr>
                 );
               })}
-              {payroll.length === 0 && <tr><td colSpan={27} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
+              {payroll.length === 0 && <tr><td colSpan={28} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
-                <td colSpan={4} className="px-2.5 py-2.5 text-[11px] text-slate-700">TOTAUX</td>
+                <td colSpan={5} className="px-2.5 py-2.5 text-[11px] text-slate-700">TOTAUX</td>
                 <LP_Td value={T.base} />
                 <LP_Td value={T.sursalaire} />
                 <LP_Td value={T.heureSuppl} />
@@ -2598,8 +2639,8 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
     if (r.hasData) moisAvecDonnees++;
     const s = r.social;
 
-    acc.baseSalary += c.baseSalary;
-    acc.sursalaire += c.sursalaire;
+    acc.baseSalary += r.baseSalaryProrated;
+    acc.sursalaire += r.sursalaireProrated;
     acc.overtimePay += r.overtimePay;
     acc.ancienneteAmount += r.ancienneteAmount;
     acc.primeFonction += primeFonctionMensuelle;
@@ -2937,7 +2978,7 @@ function LoadingScreen({ error }: { error?: string }) {
         {!error ? (
           <>
             <div className="h-8 w-8 border-3 border-orange-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-            <p className="text-sm text-slate-300">Connexion à GarageRH…</p>
+            <p className="text-sm text-slate-300">Connexion à Gestion RH-Paie…</p>
           </>
         ) : (
           <div className="max-w-sm px-6">
@@ -3015,22 +3056,6 @@ function AppShell() {
     return employees.filter(e => `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email}`.toLowerCase().includes(q));
   }, [search]);
 
-  const renderPage = () => {
-    switch (page) {
-      case 'dashboard': return <DashboardPage filtered={filtered} />;
-      case 'sites': return <SitesPage search={search} />;
-      case 'employees': return <EmployeesPage filtered={filtered} />;
-      case 'presence': return <PresencePage search={search} />;
-      case 'leave': return <LeavePage filtered={filtered} />;
-      case 'paye': return <PayePage filtered={filtered} />;
-      case 'livre-fin-annee': return <LivreFinAnneePage filtered={filtered} />;
-      case 'cs-mensuelles': return <SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" />;
-      case 'cs-semestrielles': return <SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" />;
-      case 'cs-annuelles': return <SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" />;
-      default: return <DashboardPage filtered={filtered} />;
-    }
-  };
-
   const onAction = (action: string) => {
     switch (action) {
       case 'save': alert('Toutes les données sont déjà enregistrées automatiquement et en temps réel sur le serveur — aucune action manuelle nécessaire.'); break;
@@ -3064,7 +3089,24 @@ function AppShell() {
           setSearch={setSearch}
           onAction={onAction}
         />
-        <div className="p-4 lg:p-6 max-w-[1400px] mx-auto">{renderPage()}</div>
+        {/*
+          Chaque page reste montée en permanence (juste masquée en CSS via display:none quand
+          elle n'est pas active) au lieu d'être détruite/recréée à chaque changement de menu.
+          Sans cela, les filtres, la période sélectionnée, la recherche ou le bulletin ouvert
+          dans une page étaient perdus dès qu'on la quittait puis y revenait.
+        */}
+        <div className="p-4 lg:p-6 max-w-[1400px] mx-auto">
+          <div style={{ display: page === 'dashboard' ? 'block' : 'none' }}><DashboardPage filtered={filtered} /></div>
+          <div style={{ display: page === 'sites' ? 'block' : 'none' }}><SitesPage search={search} /></div>
+          <div style={{ display: page === 'employees' ? 'block' : 'none' }}><EmployeesPage filtered={filtered} /></div>
+          <div style={{ display: page === 'presence' ? 'block' : 'none' }}><PresencePage search={search} /></div>
+          <div style={{ display: page === 'leave' ? 'block' : 'none' }}><LeavePage filtered={filtered} /></div>
+          <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PayePage filtered={filtered} /></div>
+          <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><LivreFinAnneePage filtered={filtered} /></div>
+          <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></div>
+          <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></div>
+          <div style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></div>
+        </div>
       </main>
     </div>
   );

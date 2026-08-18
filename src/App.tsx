@@ -364,7 +364,7 @@ function LoginPage({ onLogin }: { onLogin: (user: AuthUser) => void }) {
 const fmt = (d: string) => new Date(d).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
 const initials = (f: string, l: string) => `${f[0]}${l[0]}`.toUpperCase();
 const cn = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(' ');
-const formatFCFA = (n: number) => n.toLocaleString('fr-FR') + ' FCFA';
+const formatFCFA = (n: number | null | undefined) => (n ?? 0).toLocaleString('fr-FR') + ' FCFA';
 
 /* ─── Icons (inline SVG) ────────────────────────────────── */
 const Icon = ({ d, size = 20, stroke = 2, className = '' }: { d: string; size?: number; stroke?: number; className?: string }) => (
@@ -659,10 +659,11 @@ function ContractBadge({ type }: { type: string }) {
   return <span className={cn('inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold', m[type] || '')}>{type}</span>;
 }
 
-function formatMoney(n: number): string {
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + ' M FCFA';
-  if (n >= 1000) return Math.round(n / 1000).toFixed(0) + ' K FCFA';
-  return n.toLocaleString() + ' FCFA';
+function formatMoney(n: number | null | undefined): string {
+  const v = n ?? 0;
+  if (v >= 1000000) return (v / 1000000).toFixed(1) + ' M FCFA';
+  if (v >= 1000) return Math.round(v / 1000).toFixed(0) + ' K FCFA';
+  return v.toLocaleString() + ' FCFA';
 }
 
 /* ══════════════════════════════════════════════════════ */

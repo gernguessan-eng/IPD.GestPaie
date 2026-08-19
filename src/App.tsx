@@ -1190,7 +1190,7 @@ type SocialDeductions = {
   brutNonImposable: number;      // (I) Prime de fonction non imposable
   totalBrut: number;             // (K) = brutImposable + brutNonImposable
   brut: number;                  // alias de totalBrut — conservé pour compat avec "Charges sociales"
-  brutSocial: number;            // (M) = totalBrut — base de calcul CNPS
+  brutSocial: number;            // (M) = brutImposable — base de calcul CNPS/CMU (exclut la prime de fonction non imposable, conforme au bulletin de référence)
   parts: number;                 // Nombre de parts fiscales (quotient familial)
   impotsBrut: number;            // Barème IGR progressif appliqué au brut imposable
   ricf: number;                  // Réduction d'Impôt pour Charges de Famille
@@ -1210,7 +1210,12 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
   const brutImposable = Math.max(0, brutImposableAvantAbsence - absenceDeduction);
   const brutNonImposable = c.primeFonctionNonImposable || 0;
   const totalBrut = brutImposable + brutNonImposable;
-  const brutSocial = totalBrut;
+  // Base CNPS/sociale = brut imposable UNIQUEMENT (exclut la prime de fonction non imposable),
+  // conformément au bulletin de référence : la "Cotisation Retraite" y est calculée sur
+  // Salaire + Sursalaire + Ancienneté + Indemnité de responsabilité, SANS l'indemnité non
+  // taxable. "Non imposable" exempte donc à la fois de l'impôt (IGR) ET des cotisations
+  // sociales (CNPS/CMU) — pas seulement de l'impôt.
+  const brutSocial = brutImposable;
 
   const parts = computeFiscalParts(emp.familySituation, emp.numberOfChildren);
   const impotsBrut = computeIGRBrut(brutImposable);

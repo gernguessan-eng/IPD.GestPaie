@@ -1,14 +1,20 @@
-import { useState, useMemo, useEffect, Component } from 'react';
+import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
 import logo from './assets/logo.jpg';
 import {
-  sites, employees, leaves, presences, computeSalary, OVERTIME_RATES, emptyOvertime,
+  sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
   FAMILY_SITUATIONS, computeFiscalParts, computeRICF, computeIGRBrut,
   computeAncienneteRate, computeAncienneteAmount, computeCNPSSalarial, computeCNPSPatronal,
   CNPS_PLAFOND, CHARGES_PATRONALES,
-  type Employee, type Site, type Leave, type Presence, type SalaryComponents, type OvertimeHours, type FamilySituation,
+  type Employee, type Site, type PayrollOverride, type SalaryComponents, type OvertimeHours, type FamilySituation,
 } from './data/mockData';
+
+// Registre de "version des données" partagé par toute l'application : incrémenté à chaque
+// ajout/modification/suppression (employé, site, saisie de paie...). Toutes les pages en
+// dépendent dans leurs calculs pour se mettre à jour IMMÉDIATEMENT dès qu'une donnée change
+// où que ce soit dans l'appli — sans qu'il soit nécessaire d'actualiser la page.
+const DataVersionContext = createContext<{ version: number; bump: () => void }>({ version: 0, bump: () => {} });
 
 /* ══════════════════════════════════════════════════════ */
 /* TYPES AUTH                                             */
@@ -434,8 +440,6 @@ function Sidebar({
     { key: 'dashboard', label: 'Tableau de bord', icon: 'dashboard' },
     { key: 'sites', label: 'Sites', icon: 'sites' },
     { key: 'employees', label: 'Employés', icon: 'employees' },
-    { key: 'presence', label: 'Présences', icon: 'presence' },
-    { key: 'leave', label: 'Congés', icon: 'leave' },
     { key: 'paye', label: 'Paie', icon: 'paye' },
     { key: 'livre-fin-annee', label: "Livre de paie (fin d'année)", icon: 'receipt' },
     {
@@ -667,62 +671,11 @@ function formatMoney(n: number | null | undefined): string {
 }
 
 /* ══════════════════════════════════════════════════════ */
-/* PRESENCE STATUS BADGE                                 */
-/* ══════════════════════════════════════════════════════ */
-
-const presenceStyles: Record<string, { bg: string; text: string; border: string; icon: string }> = {
-  'Présent':   { bg: 'bg-green-50',     text: 'text-green-700', border: 'border-green-200',  icon: 'checkmark' },
-  'Absent':    { bg: 'bg-red-50',       text: 'text-red-700',   border: 'border-red-200',    icon: 'cross' },
-  'Congé':     { bg: 'bg-yellow-50',    text: 'text-yellow-700',border: 'border-yellow-200', icon: 'palm' },
-  'Maladie':   { bg: 'bg-purple-50',    text: 'text-purple-700',border: 'border-purple-200', icon: 'smiley' },
-  'Formation': { bg: 'bg-blue-50',      text: 'text-blue-700',  border: 'border-blue-200',  icon: 'books' },
-  'Non saisi': { bg: 'bg-gray-50',      text: 'text-gray-600',  border: 'border-gray-200',  icon: 'question' },
-};
-
-function PresenceBadge({ status, onClick, selected, disabled }: { status: Presence['status']; onClick: () => void; selected?: boolean; disabled?: boolean }) {
-  const s = presenceStyles[status] || presenceStyles['Non saisi'];
-  return (
-    <button onClick={onClick} disabled={disabled}
-      className={cn('inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-semibold border transition-all',
-        s.bg, s.text, s.border,
-        disabled ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer',
-        selected ? 'shadow-md ring-2 ring-offset-1 ring-orange-300 scale-105' : (!disabled && 'hover:shadow-sm'))}>
-      <Ico name={s.icon} size={13} />
-      {status}
-    </button>
-  );
-}
-
-function PresenceStatusCard({ label, count, color, icon }: { label: string; count: number; color: string; icon: string }) {
-  const bgMap: Record<string, { bg: string; border: string; text: string; iconBg: string }> = {
-    green: { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', iconBg: 'bg-green-100' },
-    red:   { bg: 'bg-red-50',   border: 'border-red-200',   text: 'text-red-800',   iconBg: 'bg-red-100' },
-    yellow:{ bg: 'bg-yellow-50', border: 'border-yellow-200',text: 'text-yellow-800', iconBg: 'bg-yellow-100' },
-    purple:{ bg: 'bg-purple-50', border: 'border-purple-200',text: 'text-purple-800', iconBg: 'bg-purple-100' },
-    blue:  { bg: 'bg-blue-50',  border: 'border-blue-200',  text: 'text-blue-800',  iconBg: 'bg-blue-100' },
-    gray:  { bg: 'bg-gray-50',  border: 'border-gray-200',  text: 'text-gray-700',  iconBg: 'bg-gray-200' },
-  };
-  const c = bgMap[color] || bgMap.gray;
-
-  return (
-    <div className={cn('rounded-2xl border p-4 min-w-[120px]', c.bg, c.border)}>
-      <div className={cn('h-10 w-10 rounded-xl flex items-center justify-center mb-2', c.iconBg)}>
-        <Ico name={icon} size={22} className={c.text.replace('800','')} />
-      </div>
-      <p className={cn('text-lg font-extrabold', c.text)}>{count}</p>
-      <p className={cn('text-[11px] font-medium', c.text, 'opacity-80')}>{label}</p>
-    </div>
-  );
-}
-
-
-/* ══════════════════════════════════════════════════════ */
 /* PAGE: DASHBOARD                                        */
 /* ══════════════════════════════════════════════════════ */
 
 function DashboardPage({ filtered }: { filtered: Employee[] }) {
   const acts = filtered.filter((e) => e.status === 'Actif').length;
-  const leaveCount = leaves.filter((l) => l.status === 'En attente').length;
   const inLeave = employees.filter((e) => e.status === 'En congé').length;
   const totalSalary = filtered.reduce((acc, e) => acc + e.salary, 0);
 
@@ -731,49 +684,27 @@ function DashboardPage({ filtered }: { filtered: Employee[] }) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="Employés actifs" value={acts} sub={`${filtered.length} au total`} icon="employees" color="indigo" />
         <StatCard label="Sites actifs" value={sites.length} sub={`${sites.length} localisations`} icon="sites" color="violet" />
-        <StatCard label="Demandes de congés" value={leaveCount} sub={`${inLeave} en congé`} icon="leave" color="amber" />
+        <StatCard label="Employés en congé" value={inLeave} sub={`sur ${filtered.length} au total`} icon="leave" color="amber" />
         <StatCard label="Masse salariale totale" value={formatMoney(totalSalary)} sub={`Mensuel`} icon="paye" color="emerald" />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-          <h3 className="text-sm font-bold text-slate-800 mb-4">Employés par département</h3>
-          <div className="space-y-3">
-            {['Mécanique', 'Administration', 'Finance', 'Carrosserie', 'Magasin', 'Direction'].map((dept) => {
-              const count = filtered.filter((e) => e.department === dept).length;
-              const pct = filtered.length ? Math.round((count / filtered.length) * 100) : 0;
-              const colors: Record<string, string> = { Mécanique: '#6366f1', Administration: '#f59e0b', Finance: '#10b981', Carrosserie: '#8b5cf6', Magasin: '#ec4899', Direction: '#e11d48' };
-              return (<div key={dept}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-slate-600">{dept}</span>
-                  <span className="text-[11px] font-semibold text-slate-700">{count} <span className="text-slate-400">({pct}%)</span></span>
-                </div>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: colors[dept] || '#94a3b8' }} />
-                </div>
-              </div>);
-            })}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-          <h3 className="text-sm font-bold text-slate-800 mb-4">Derniers congés</h3>
-          <div className="space-y-3">
-            {leaves.slice(0, 4).map((l) => {
-              const emp = employees.find((e) => e.id === l.employeeId);
-              if (!emp) return null;
-              return (
-                <div key={l.id} className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                  <Avatar emp={emp} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-slate-700 truncate">{emp.firstName} {emp.lastName}</p>
-                    <p className="text-[10px] text-slate-400">{l.type}</p>
-                  </div>
-                  <StatusBadge status={l.status} />
-                </div>
-              );
-            })}
-          </div>
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <h3 className="text-sm font-bold text-slate-800 mb-4">Employés par département</h3>
+        <div className="space-y-3">
+          {['Mécanique', 'Administration', 'Finance', 'Carrosserie', 'Magasin', 'Direction'].map((dept) => {
+            const count = filtered.filter((e) => e.department === dept).length;
+            const pct = filtered.length ? Math.round((count / filtered.length) * 100) : 0;
+            const colors: Record<string, string> = { Mécanique: '#6366f1', Administration: '#f59e0b', Finance: '#10b981', Carrosserie: '#8b5cf6', Magasin: '#ec4899', Direction: '#e11d48' };
+            return (<div key={dept}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-slate-600">{dept}</span>
+                <span className="text-[11px] font-semibold text-slate-700">{count} <span className="text-slate-400">({pct}%)</span></span>
+              </div>
+              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: colors[dept] || '#94a3b8' }} />
+              </div>
+            </div>);
+          })}
         </div>
       </div>
 
@@ -978,6 +909,7 @@ function EmployeeExtraFields({ form, setForm, onLogo }: {
 }
 
 function EmployeesPage({ filtered }: { filtered: Employee[] }) {
+  const { bump } = useContext(DataVersionContext);
   const [modal, setModal] = useState(false);
   const [editModal, setEditModal] = useState<Employee | null>(null);
   const [form, setForm] = useState<Partial<Employee>>({});
@@ -1018,6 +950,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
     employees.push(newEmp);
     persistDoc('employees', newEmp.id, newEmp);
     setModal(false);
+    bump();
   }
 
   function openEdit(emp: Employee) {
@@ -1030,6 +963,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
     Object.assign(editModal, form, { components: comp, salary: computeSalary(comp) });
     persistDoc('employees', editModal.id, editModal);
     setEditModal(null);
+    bump();
   }
 
   // Import du logo (data URL)
@@ -1039,7 +973,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
     reader.onload = () => setForm(f => ({ ...f, logoUrl: reader.result as string }));
     reader.readAsDataURL(file);
   }
-  function handleDelete(id: string) { if (confirm('Supprimer cet employé ?')) { const i = employees.findIndex(e => e.id === id); if (i >= 0) employees.splice(i, 1); removeDoc('employees', id); } }
+  function handleDelete(id: string) { if (confirm('Supprimer cet employé ?')) { const i = employees.findIndex(e => e.id === id); if (i >= 0) employees.splice(i, 1); removeDoc('employees', id); bump(); } }
 
   return (
     <div className="space-y-4">
@@ -1146,16 +1080,17 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
 /* ══════════════════════════════════════════════════════ */
 
 function SitesPage({ search }: { search: string }) {
+  const { bump } = useContext(DataVersionContext);
   const [addModal, setAddModal] = useState(false);
   const [editModal, setEditModal] = useState<Site | null>(null);
   const [mForm, setMForm] = useState<Partial<Site>>({});
 
   function saveNew() {
     const ns: Site = { id:`s${Date.now()}`, name:mForm.name||'', address:mForm.address||'', city:mForm.city||'', phone:mForm.phone||'', manager:mForm.manager||'', capacity:Number(mForm.capacity)||10 };
-    sites.push(ns); persistDoc('sites', ns.id, ns); setAddModal(false);
+    sites.push(ns); persistDoc('sites', ns.id, ns); setAddModal(false); bump();
   }
   function saveEdit() {
-    if(!editModal)return;Object.assign(editModal,mForm);persistDoc('sites', editModal.id, editModal);setEditModal(null);
+    if(!editModal)return;Object.assign(editModal,mForm);persistDoc('sites', editModal.id, editModal);setEditModal(null);bump();
   }
 
   const q = search.trim().toLowerCase();
@@ -1177,7 +1112,7 @@ function SitesPage({ search }: { search: string }) {
               <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-orange-100 to-orange-200 flex items-center justify-center text-orange-600"><Ico name="sites" size={20}/></div>
               <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e=>e.stopPropagation()}>
                 <button onClick={()=>{setMForm({...s});setEditModal(s)}} className="p-1.5 text-slate-400 hover:text-orange-600 rounded-lg hover:bg-orange-50"><Ico name="edit" size={13}/></button>
-                <button onClick={()=>{if(confirm('Supprimer ce site ?')){const i=sites.findIndex(x=>x.id===s.id);if(i>=0)sites.splice(i,1);removeDoc('sites', s.id);}}} className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50"><Ico name="trash" size={13}/></button>
+                <button onClick={()=>{if(confirm('Supprimer ce site ?')){const i=sites.findIndex(x=>x.id===s.id);if(i>=0)sites.splice(i,1);removeDoc('sites', s.id);bump();}}} className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50"><Ico name="trash" size={13}/></button>
               </div>
             </div>
             <h4 className="text-sm font-bold text-slate-800">{s.name}</h4>
@@ -1212,551 +1147,6 @@ function SitesPage({ search }: { search: string }) {
           <div className="flex gap-2 pt-2">
             <button onClick={saveEdit} className="flex-1 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"><Ico name="save" size={14}/> Enregistrer</button>
             <button onClick={()=>setEditModal(null)} className="px-4 py-2.5 bg-slate-100 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-200">Annuler</button>
-          </div>
-        </div>
-      </Modal>
-    </div>
-  );
-}
-
-
-/* ══════════════════════════════════════════════════════ */
-/* PAGE: PRÉSENCES                                         */
-/* ══════════════════════════════════════════════════════ */
-
-// Vérifie si un employé est en congé ACCEPTÉ à une date donnée
-function isOnAcceptedLeave(employeeId: string, date: string): boolean {
-  return leaves.some(l =>
-    l.employeeId === employeeId &&
-    l.status === 'Accepté' &&
-    date >= l.startDate && date <= l.endDate
-  );
-}
-
-function PresencePage({ search }: { search: string }) {
-  const today = new Date().toISOString().split('T')[0];
-  const [selectedDate, setSelectedDate] = useState(today);
-  const [selectedSite, setSelectedSite] = useState('all');
-  const [selectedEmpId, setSelectedEmpId] = useState<string | null>(null);
-  const [pForm, setPForm] = useState<{
-    status: Presence['status'];
-    justification: 'Justifié' | 'Non justifié';
-    duree: number;
-    overtime: OvertimeHours;
-    notes: string;
-  }>({ status: 'Non saisi', justification: 'Non justifié', duree: 1, overtime: emptyOvertime(), notes: '' });
-  const [tick, setTick] = useState(0); // force re-render
-  const refresh = () => setTick(t => t + 1);
-
-  // Période récapitulatif
-  const [periodStart, setPeriodStart] = useState('2025-06-02');
-  const [periodEnd, setPeriodEnd] = useState('2025-06-04');
-  const [showPeriod, setShowPeriod] = useState(false);
-
-  // Synchronise automatiquement les congés acceptés vers les présences
-  const syncLeavesToPresences = () => {
-    leaves.filter(l => l.status === 'Accepté').forEach(l => applyAcceptedLeaveToPresences(l));
-  };
-  // Exécuter une fois au montage
-  useMemo(() => { syncLeavesToPresences(); }, []);
-
-  const q = search.trim().toLowerCase();
-  let displayEmps = selectedSite === 'all' ? employees : employees.filter(e => e.siteId === selectedSite);
-  if (q) {
-    displayEmps = displayEmps.filter(e => {
-      const site = sites.find(s => s.id === e.siteId);
-      return `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email} ${site?.name || ''}`.toLowerCase().includes(q);
-    });
-  }
-
-  const getPresence = (employeeId: string): Presence | null =>
-    presences.find(p => p.employeeId === employeeId && p.date === selectedDate) || null;
-
-  // Récupère les heures sup d'une présence (compat. ancien champ heuresSup => h15)
-  const getOvertime = (p: Presence | null | undefined): OvertimeHours => {
-    if (!p) return emptyOvertime();
-    if (p.overtime) return p.overtime;
-    return { ...emptyOvertime(), h15: p.heuresSup || 0 };
-  };
-  const sumOvertime = (o: OvertimeHours): number => o.h15 + o.h50 + o.h75 + o.h100 + o.h200;
-
-  // Daily counts
-  const counts: Record<string, number> = { 'Présent': 0, 'Absent': 0, 'Congé': 0, 'Maladie': 0, 'Formation': 0, 'Non saisi': 0 };
-  displayEmps.forEach(emp => { const p = getPresence(emp.id); counts[p ? p.status : 'Non saisi']++; });
-
-  const setStatus = (empId: string, status: Presence['status']) => {
-    let p = getPresence(empId);
-    if (p) { p.status = status; }
-    else { p = { id: `pr${Date.now()}-${empId}`, employeeId: empId, date: selectedDate, status }; presences.push(p); }
-    return p;
-  };
-
-  const openPresenceEdit = (empId: string, presetStatus?: Presence['status']) => {
-    let p = getPresence(empId);
-    if (presetStatus) p = setStatus(empId, presetStatus);
-    if (!p) p = setStatus(empId, 'Non saisi');
-    setPForm({
-      status: p.status,
-      justification: p.justification || 'Non justifié',
-      duree: p.duree || 1,
-      overtime: getOvertime(p),
-      notes: p.notes || '',
-    });
-    setSelectedEmpId(empId);
-    refresh();
-  };
-
-  const savePresence = () => {
-    if (!selectedEmpId) return;
-    let p = getPresence(selectedEmpId);
-    if (!p) p = setStatus(selectedEmpId, pForm.status);
-    p.status = pForm.status;
-    p.overtime = { ...pForm.overtime };
-    p.heuresSup = undefined;
-    p.notes = pForm.notes;
-    // Conditional fields
-    if (pForm.status === 'Absent' || pForm.status === 'Maladie') { p.justification = pForm.justification; p.duree = undefined; }
-    else if (pForm.status === 'Congé' || pForm.status === 'Formation') { p.duree = pForm.duree; p.justification = undefined; }
-    else { p.justification = undefined; p.duree = undefined; }
-    persistDoc('presences', p.id, p);
-    setSelectedEmpId(null);
-    refresh();
-  };
-
-  const allStatuses: Presence['status'][] = ['Présent', 'Absent', 'Congé', 'Maladie', 'Formation', 'Non saisi'];
-  const needsJustification = pForm.status === 'Absent' || pForm.status === 'Maladie';
-  const needsDuree = pForm.status === 'Congé' || pForm.status === 'Formation';
-
-  // ── PÉRIODE : récapitulatif ──
-  const datesInPeriod = useMemo(() => {
-    const dates: string[] = [];
-    const start = new Date(periodStart); const end = new Date(periodEnd);
-    if (start > end) return dates;
-    const d = new Date(start);
-    while (d <= end) { dates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1); }
-    return dates;
-  }, [periodStart, periodEnd, tick]);
-
-  const periodSummary = useMemo(() => {
-    return displayEmps.map(emp => {
-      const rec = { 'Présent': 0, 'Absent': 0, 'Congé': 0, 'Maladie': 0, 'Formation': 0, 'Non saisi': 0, absNonJust: 0, absJust: 0, heuresSup: 0 };
-      datesInPeriod.forEach(date => {
-        const p = presences.find(pr => pr.employeeId === emp.id && pr.date === date);
-        const st = p ? p.status : 'Non saisi';
-        rec[st]++;
-        if (p) {
-          rec.heuresSup += sumOvertime(getOvertime(p));
-          if (p.status === 'Absent') { if (p.justification === 'Non justifié') rec.absNonJust++; else rec.absJust++; }
-        }
-      });
-      return { emp, ...rec };
-    });
-  }, [displayEmps, datesInPeriod, tick]);
-
-  const selectedEmp = selectedEmpId ? employees.find(e => e.id === selectedEmpId) : null;
-
-  return (
-    <div className="space-y-4">
-      {/* Top bar */}
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-wrap items-center gap-4">
-        <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-slate-600">Date :</label>
-          <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)}
-            className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        </div>
-        <select value={selectedSite} onChange={(e) => setSelectedSite(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
-          <option value="all">Tous les sites</option>
-          {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-
-        {/* Période récap */}
-        <div className="ml-auto flex flex-wrap items-center gap-2 border-l border-slate-200 pl-4">
-          <span className="text-[11px] font-semibold text-slate-500 uppercase">Récapitulatif période :</span>
-          <span className="text-[10px] text-slate-400">Du</span>
-          <input type="date" value={periodStart} onChange={(e) => { setPeriodStart(e.target.value); setShowPeriod(true); }}
-            className="px-2 py-1.5 text-[11px] border border-slate-200 rounded-lg bg-slate-50 focus:ring-2 focus:ring-orange-300" />
-          <span className="text-[10px] text-slate-400">Au</span>
-          <input type="date" value={periodEnd} onChange={(e) => { setPeriodEnd(e.target.value); setShowPeriod(true); }}
-            className="px-2 py-1.5 text-[11px] border border-slate-200 rounded-lg bg-slate-50 focus:ring-2 focus:ring-orange-300" />
-          <button onClick={() => setShowPeriod(!showPeriod)}
-            className="px-3 py-1.5 text-[11px] font-semibold bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors">
-            {showPeriod ? 'Masquer' : 'Afficher'}
-          </button>
-        </div>
-      </div>
-
-      {/* Status summary cards (jour) */}
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
-        <PresenceStatusCard label="Présent" count={counts['Présent']} color="green" icon="checkmark" />
-        <PresenceStatusCard label="Absent" count={counts['Absent']} color="red" icon="cross" />
-        <PresenceStatusCard label="Congé" count={counts['Congé']} color="yellow" icon="palm" />
-        <PresenceStatusCard label="Maladie" count={counts['Maladie']} color="purple" icon="smiley" />
-        <PresenceStatusCard label="Formation" count={counts['Formation']} color="blue" icon="books" />
-        <PresenceStatusCard label="Non saisi" count={counts['Non saisi']} color="gray" icon="question" />
-      </div>
-
-      {/* TABLEAU RÉCAPITULATIF DE PÉRIODE */}
-      {showPeriod && (
-        <div className="bg-white rounded-2xl border border-orange-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-3 bg-orange-50 border-b border-orange-100 flex items-center gap-2">
-            <Ico name="calendar" size={16} className="text-orange-600" />
-            <h3 className="text-sm font-bold text-orange-800">
-              Récapitulatif des présences — du {fmt(periodStart)} au {fmt(periodEnd)} ({datesInPeriod.length} jour{datesInPeriod.length > 1 ? 's' : ''})
-            </h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="px-4 py-2.5 text-[10px] font-bold text-slate-400 uppercase">Employé</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-green-600 uppercase text-center">Présent</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-red-600 uppercase text-center">Abs. justifié</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-red-700 uppercase text-center">Abs. non just.</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-yellow-600 uppercase text-center">Congé</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-purple-600 uppercase text-center">Maladie</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-blue-600 uppercase text-center">Formation</th>
-                <th className="px-3 py-2.5 text-[10px] font-bold text-indigo-600 uppercase text-center">H. Sup</th>
-              </tr></thead>
-              <tbody className="divide-y divide-slate-100">
-                {periodSummary.map(r => (
-                  <tr key={r.emp.id} className="hover:bg-slate-50/50">
-                    <td className="px-4 py-2.5"><div className="flex items-center gap-2"><Avatar emp={r.emp} /><span className="text-xs font-semibold text-slate-700">{r.emp.firstName} {r.emp.lastName}</span></div></td>
-                    <td className="px-3 py-2.5 text-center text-xs font-bold text-green-700">{r['Présent'] || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs text-red-600">{r.absJust || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs font-bold text-red-700">{r.absNonJust || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs text-yellow-700">{r['Congé'] || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs text-purple-700">{r['Maladie'] || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs text-blue-700">{r['Formation'] || '-'}</td>
-                    <td className="px-3 py-2.5 text-center text-xs font-bold text-indigo-700">{r.heuresSup ? `${r.heuresSup}h` : '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* TABLEAU POINTAGE QUOTIDIEN */}
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-800">Pointage quotidien — {fmt(selectedDate)}</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[220px]">EMPLOYÉ</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">SITE</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">POINTAGE</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[360px]">HEURES SUPP. (15% · 50% · 75% · 100% · 200%)</th>
-            </tr></thead>
-            <tbody className="divide-y divide-slate-100">
-              {displayEmps.map(emp => {
-                const lockedOnLeave = isOnAcceptedLeave(emp.id, selectedDate);
-                // Si en congé accepté, on force le statut à 'Congé'
-                let pres = getPresence(emp.id);
-                if (lockedOnLeave && (!pres || pres.status !== 'Congé')) {
-                  pres = setStatus(emp.id, 'Congé');
-                }
-                const site = sites.find(s => s.id === emp.siteId);
-                const currentStatus = pres ? pres.status : 'Non saisi';
-                return (
-                  <tr key={emp.id} className={cn('hover:bg-slate-50/50', lockedOnLeave && 'bg-yellow-50/40')}>
-                    <td className="px-4 py-3">
-                      <div className={cn('flex items-center gap-3 rounded-lg p-1 -m-1', !lockedOnLeave && 'cursor-pointer hover:bg-orange-50')} onClick={() => !lockedOnLeave && openPresenceEdit(emp.id)}>
-                        <Avatar emp={emp} />
-                        <div>
-                          <p className="text-xs font-bold text-slate-800">{emp.firstName} {emp.lastName}</p>
-                          <p className="text-[10px] text-slate-400">{emp.position}</p>
-                          {/* Tags justif/durée */}
-                          {lockedOnLeave &&
-                            <span className="inline-flex items-center gap-1 mt-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">🔒 Congé validé</span>}
-                          {!lockedOnLeave && pres && (pres.status === 'Absent' || pres.status === 'Maladie') && pres.justification &&
-                            <span className={cn('inline-block mt-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded', pres.justification === 'Justifié' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>{pres.justification}</span>}
-                          {!lockedOnLeave && pres && (pres.status === 'Congé' || pres.status === 'Formation') && pres.duree &&
-                            <span className="inline-block mt-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{pres.duree} j</span>}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{site?.name || '-'}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {allStatuses.map(st => (
-                          <PresenceBadge key={st} status={st} selected={currentStatus === st}
-                            disabled={lockedOnLeave && st !== 'Congé'}
-                            onClick={() => {
-                              if (lockedOnLeave) return; // verrouillé sur congé
-                              if (st === 'Absent' || st === 'Maladie' || st === 'Congé' || st === 'Formation') {
-                                openPresenceEdit(emp.id, st);
-                              } else {
-                                const p = setStatus(emp.id, st); persistDoc('presences', p.id, p); refresh();
-                              }
-                            }} />
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {OVERTIME_RATES.map(rate => {
-                          const ot = getOvertime(pres);
-                          return (
-                            <div key={rate.key} className="flex flex-col items-center">
-                              <span className="text-[8px] font-bold text-indigo-500 mb-0.5">{rate.label}</span>
-                              <input type="number" min={0} step={0.5} value={ot[rate.key] || 0} disabled={lockedOnLeave}
-                                onChange={(e) => {
-                                  let p = getPresence(emp.id);
-                                  if (!p) p = setStatus(emp.id, 'Non saisi');
-                                  const cur = getOvertime(p);
-                                  p.overtime = { ...cur, [rate.key]: Number(e.target.value) };
-                                  p.heuresSup = undefined;
-                                  persistDoc('presences', p.id, p);
-                                  refresh();
-                                }}
-                                className={cn('w-12 px-1 py-1 text-[11px] text-center border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-300', lockedOnLeave ? 'bg-slate-100 text-slate-400' : 'bg-slate-50')} />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* MODALE D'ÉDITION */}
-      <Modal open={!!selectedEmpId} onClose={() => setSelectedEmpId(null)}
-        title={`Pointage — ${selectedEmp ? selectedEmp.firstName + ' ' + selectedEmp.lastName : ''}`}
-        actions={
-          <button onClick={savePresence} className="px-5 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm">
-            <Ico name="save" size={14} /> Enregistrer
-          </button>
-        }>
-        <div className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-[11px] font-medium text-slate-500">Statut</label>
-            <select value={pForm.status} onChange={(e) => setPForm({ ...pForm, status: e.target.value as Presence['status'] })}
-              className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
-              {allStatuses.map(st => <option key={st} value={st}>{st}</option>)}
-            </select>
-          </div>
-
-          {/* Justification (Absent / Maladie) */}
-          {needsJustification && (
-            <div className="space-y-1.5 p-3 rounded-xl bg-amber-50 border border-amber-200">
-              <label className="text-[11px] font-bold text-amber-800">Cette absence est-elle justifiée ?</label>
-              <div className="flex gap-2">
-                {(['Justifié', 'Non justifié'] as const).map(j => (
-                  <button key={j} onClick={() => setPForm({ ...pForm, justification: j })}
-                    className={cn('flex-1 py-2 text-xs font-semibold rounded-lg border transition-all',
-                      pForm.justification === j
-                        ? (j === 'Justifié' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-red-500 text-white border-red-500')
-                        : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50')}>
-                    {j}
-                  </button>
-                ))}
-              </div>
-              {pForm.justification === 'Non justifié' && (
-                <p className="text-[10px] text-red-600 mt-1">⚠ Une absence non justifiée entraîne une retenue sur salaire (voir menu Paie).</p>
-              )}
-            </div>
-          )}
-
-          {/* Durée (Congé / Formation) */}
-          {needsDuree && (
-            <div className="space-y-1.5 p-3 rounded-xl bg-sky-50 border border-sky-200">
-              <label className="text-[11px] font-bold text-sky-800">Durée ({pForm.status.toLowerCase()})</label>
-              <div className="flex items-center gap-2">
-                <input type="number" min={1} value={pForm.duree} onChange={(e) => setPForm({ ...pForm, duree: Number(e.target.value) })}
-                  className="w-24 px-3 py-2 text-xs border border-sky-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-sky-300" />
-                <span className="text-xs text-slate-600">jour(s)</span>
-              </div>
-            </div>
-          )}
-
-          {/* Heures supplémentaires par taux */}
-          <div className="space-y-2 p-3 rounded-xl bg-indigo-50 border border-indigo-200">
-            <label className="text-[11px] font-bold text-indigo-800">Heures supplémentaires (par taux de majoration)</label>
-            <div className="grid grid-cols-5 gap-2">
-              {OVERTIME_RATES.map(rate => (
-                <div key={rate.key} className="flex flex-col items-center">
-                  <span className="text-[10px] font-bold text-indigo-600 mb-1">{rate.label}</span>
-                  <input type="number" min={0} step={0.5} value={pForm.overtime[rate.key]}
-                    onChange={(e) => setPForm({ ...pForm, overtime: { ...pForm.overtime, [rate.key]: Number(e.target.value) } })}
-                    className="w-full px-1.5 py-1.5 text-xs text-center border border-indigo-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                  <span className="text-[8px] text-slate-400 mt-0.5">h</span>
-                </div>
-              ))}
-            </div>
-            <p className="text-[10px] text-indigo-600">Total : {pForm.overtime.h15 + pForm.overtime.h50 + pForm.overtime.h75 + pForm.overtime.h100 + pForm.overtime.h200} h supplémentaires</p>
-          </div>
-
-          <InputField label="Notes (optionnel)" value={pForm.notes} onChange={v => setPForm({ ...pForm, notes: v })} placeholder="Commentaire..." />
-        </div>
-      </Modal>
-    </div>
-  );
-}
-
-
-/* ══════════════════════════════════════════════════════ */
-/* PAGE: CONGÉS                                            */
-/* ══════════════════════════════════════════════════════ */
-
-// Applique un congé accepté aux présences (verrouille la période sur 'Congé')
-function applyAcceptedLeaveToPresences(l: Leave) {
-  if (l.status !== 'Accepté') return;
-  const d = new Date(l.startDate); const end = new Date(l.endDate);
-  while (d <= end) {
-    const ds = d.toISOString().split('T')[0];
-    const existing = presences.find(p => p.employeeId === l.employeeId && p.date === ds);
-    if (existing) { existing.status = 'Congé'; existing.duree = existing.duree || 1; persistDoc('presences', existing.id, existing); }
-    else { const np: Presence = { id: `lv${l.id}-${ds}`, employeeId: l.employeeId, date: ds, status: 'Congé', duree: 1 }; presences.push(np); persistDoc('presences', np.id, np); }
-    d.setDate(d.getDate() + 1);
-  }
-}
-// Retire les présences générées par un congé (si statut ≠ accepté)
-function removeLeavePresences(l: Leave) {
-  const d = new Date(l.startDate); const end = new Date(l.endDate);
-  while (d <= end) {
-    const ds = d.toISOString().split('T')[0];
-    const pid = `lv${l.id}-${ds}`;
-    const idx = presences.findIndex(p => p.id === pid);
-    if (idx >= 0) { presences.splice(idx, 1); removeDoc('presences', pid); }
-    d.setDate(d.getDate() + 1);
-  }
-}
-
-function LeavePage({ filtered }: { filtered: Employee[] }) {
-  const [modal, setModal] = useState(false);
-  const [editItem, setEditItem] = useState<Leave | null>(null);
-  const [lForm, setLForm] = useState({ employeeId:'', type:'Congé annuel' as Leave['type'], startDate:'', endDate:'', reason:'', status:'En attente' as Leave['status'] });
-  const [filterS, setFilterS] = useState('');
-  const [tick, setTick] = useState(0);
-  const refresh = () => setTick(t => t + 1);
-
-  const sorted = [...leaves].sort((a,b)=>b.startDate.localeCompare(a.startDate));
-  let display = sorted;
-  if(filterS) display = display.filter(l=>l.status===filterS);
-
-  // Change le statut d'un congé et synchronise les présences
-  const changeStatus = (l: Leave, newStatus: Leave['status']) => {
-    l.status = newStatus;
-    persistDoc('leaves', l.id, l);
-    if (newStatus === 'Accepté') applyAcceptedLeaveToPresences(l);
-    else removeLeavePresences(l);
-    refresh();
-  };
-
-  const create = ()=>{
-    const newLeave: Leave = {id:`l${Date.now()}`, ...lForm};
-    leaves.push(newLeave);
-    persistDoc('leaves', newLeave.id, newLeave);
-    if (newLeave.status === 'Accepté') applyAcceptedLeaveToPresences(newLeave);
-    setModal(false); refresh();
-  };
-
-  const saveEdit =()=>{
-    if(!editItem)return;
-    Object.assign(editItem,lForm);
-    persistDoc('leaves', editItem.id, editItem);
-    if (editItem.status === 'Accepté') applyAcceptedLeaveToPresences(editItem);
-    else removeLeavePresences(editItem);
-    setEditItem(null); refresh();
-  };
-
-  void tick;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex gap-2">
-          {['Tous','En attente','Accepté','Refusé'].map(f=>{
-            const v=f==='Tous'?'':f;
-            return <button key={f} onClick={()=>setFilterS(v)}
-              className={cn('px-3 py-1.5 text-[11px] font-medium rounded-lg transition-colors', filterS===v?'bg-orange-100 text-orange-700':'bg-slate-100 text-slate-500 hover:bg-slate-200')}>
-              {f}{v===''?`(${leaves.length})`:`(${leaves.filter(l=>l.status===v).length})`}
-            </button>;
-          })}
-        </div>
-        <button onClick={()=>{setLForm({employeeId:'',type:'Congé annuel',startDate:'',endDate:'',reason:'',status:'En attente'});setModal(true)}}
-          className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-semibold rounded-xl shadow-sm">
-          <Ico name="plus" size={15}/> Nouvelle demande
-        </button>
-      </div>
-
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Employé</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Type</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Dates</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Motif</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Statut</th>
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Actions</th>
-            </tr></thead>
-            <tbody className="divide-y divide-slate-100">
-              {display.map(l=>{
-                const emp=filtered.find(e=>e.id===l.employeeId); if(!emp)return null;
-                const days=Math.ceil(((new Date(l.endDate).getTime() as number) - (new Date(l.startDate).getTime() as number))/86400000)+1;
-                return <tr key={l.id} className="hover:bg-slate-50/80 cursor-pointer" onClick={()=>{setLForm({...l});setEditItem(l);}}>
-                  <td className="px-4 py-3"><div className="flex items-center gap-2"><Avatar emp={emp}/><span className="text-xs font-semibold text-slate-700">{emp.firstName} {emp.lastName}</span></div></td>
-                  <td className="px-4 py-3 text-xs text-slate-600">{l.type}</td>
-                  <td className="px-4 py-3 text-xs text-slate-600">{fmt(l.startDate)} → {fmt(l.endDate)}<br/><span className="text-[10px] text-slate-400">{days} jour(s)</span></td>
-                  <td className="px-4 py-3 text-xs text-slate-500">{l.reason}</td>
-                  <td className="px-4 py-3" onClick={e=>e.stopPropagation()}>
-                    <div className="space-y-1 inline-block">
-                      <select value={l.status} onChange={(e)=> changeStatus(l, e.target.value as Leave['status']) }
-                        className="text-[10px] font-semibold px-2 py-1 rounded-lg border cursor-pointer focus:outline-none focus:ring-2 focus:ring-orange-300"
-                        style={{
-                          backgroundColor:l.status==='En attente'?'#fef3c7':l.status==='Accepté'?'#d1fae5':'#fee2e2',
-                          color:l.status==='En attente'?'#b45309':l.status==='Accepté'?'#047857':'#dc2626'
-                        }}>
-                        <option value="En attente">En attente</option>
-                        <option value="Accepté">Accepté</option>
-                        <option value="Refusé">Refusé</option>
-                      </select>
-                      {l.status === 'Accepté' && <p className="text-[9px] text-emerald-600 mt-0.5">↳ Présences verrouillées</p>}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3" onClick={e=>e.stopPropagation()}>
-                    <div className="flex gap-1">
-                      <button onClick={()=>{setLForm({...l});setEditItem(l);}} className="p-1.5 text-slate-400 hover:text-orange-600 rounded-lg hover:bg-orange-50"><Ico name="edit" size={14}/></button>
-                      <button onClick={()=>{if(confirm('Supprimer cette demande ?')){const i=leaves.findIndex(x=>x.id===l.id);if(i>=0)leaves.splice(i,1);removeDoc('leaves', l.id);}}} className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50"><Ico name="trash" size={14}/></button>
-                    </div>
-                  </td>
-                </tr>;
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Add modal */}
-      <Modal open={modal} onClose={()=>setModal(false)} title="Nouvelle demande de congé">
-        <div className="space-y-3">
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Employé</label><select value={lForm.employeeId} onChange={e=>setLForm({...lForm,employeeId:e.target.value})} className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50"><option>Sélectionner...</option>{filtered.map(e=><option key={e.id} value={e.id}>{e.firstName} {e.lastName}</option>)}</select></div>
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Type</label><select value={lForm.type} onChange={e=>setLForm({...lForm,type:e.target.value as Leave['type']})} className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50"><option>Congé annuel</option><option>Congé maladie</option><option>Congé maternité</option><option>RTT</option><option>Congé sans solde</option></select></div>
-          <div className="grid grid-cols-2 gap-3"><InputField label="Début" type="date" value={lForm.startDate} onChange={v=>setLForm({...lForm,startDate:v})}/><InputField label="Fin" type="date" value={lForm.endDate} onChange={v=>setLForm({...lForm,endDate:v})}/></div>
-          <InputField label="Motif" value={lForm.reason} onChange={v=>setLForm({...lForm,reason:v})} placeholder="Raison du congé..."/>
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Statut initial</label><select value={lForm.status} onChange={e=>setLForm({...lForm,status:e.target.value as Leave['status']})} className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50"><option>En attente</option><option>Accepté</option><option>Refusé</option></select></div>
-          <button onClick={create} className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"><Ico name="save" size={14}/> Soumettre</button>
-        </div>
-      </Modal>
-
-      {/* Edit modal */}
-      <Modal open={!!editItem} onClose={()=>setEditItem(null)} title="Modifier la demande">
-        <div className="space-y-3">
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Employé</label><select value={lForm.employeeId} disabled className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50"><option>{employees.find(e=>e.id===lForm.employeeId)?.firstName+' '+employees.find(e=>e.id===lForm.employeeId)?.lastName}</option></select></div>
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Type</label><select value={lForm.type} onChange={e=>setLForm({...lForm,type:e.target.value as Leave['type']})} className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50"><option>Congé annuel</option><option>Congé maladie</option><option>Congé maternité</option><option>RTT</option><option>Congé sans solde</option></select></div>
-          <div className="grid grid-cols-2 gap-3"><InputField label="Début" type="date" value={lForm.startDate} onChange={v=>setLForm({...lForm,startDate:v})}/><InputField label="Fin" type="date" value={lForm.endDate} onChange={v=>setLForm({...lForm,endDate:v})}/></div>
-          <InputField label="Motif" value={lForm.reason} onChange={v=>setLForm({...lForm,reason:v})}/>
-          <div className="space-y-1"><label className="text-[11px] text-slate-500">Statut</label><select value={lForm.status} onChange={e=>setLForm({...lForm,status:e.target.value as Leave['status']})} className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300"><option>En attente</option><option>Accepté</option><option>Refusé</option></select></div>
-          <div className="flex gap-2 pt-2">
-            <button onClick={saveEdit} className="flex-1 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"><Ico name="save" size={14}/> Enregistrer</button>
-            <button onClick={()=>setEditItem(null)} className="px-4 py-2.5 bg-slate-100 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-200">Annuler</button>
           </div>
         </div>
       </Modal>
@@ -1840,59 +1230,36 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
 }
 
 type PayrollRow = {
-  emp: Employee; dailyRate: number; hourlyRate: number; absNonJust: number; absJust: number;
+  emp: Employee; dailyRate: number; hourlyRate: number;
   heuresSup: number; ot: OvertimeHours; deduction: number; overtimePay: number; netToPay: number;
   ancienneteAmount: number; ancienneteRatePct: number; joursPayes: number; joursNonPayes: number;
   baseSalaryProrated: number; sursalaireProrated: number;
   social: SocialDeductions; hasData: boolean;
 };
 
-// Calcule la paie RÉELLE d'un employé sur une période donnée, à partir des présences
-// effectivement saisies (absences, heures sup) ET des formules du classeur Excel I.P & D
-// (ancienneté auto-calculée, barème IGR progressif, quotient familial, CNPS plafonné...).
-// Fonction unique utilisée par la page "Paie", le bulletin de paie, "Charges sociales" et
-// le "Livre de paie en fin d'année", pour garantir des montants identiques partout.
-// hasData = true si au moins une présence a été saisie sur la période (sinon le calcul
-// retombe par défaut sur le salaire de base, comme si l'employé avait été présent).
+// Calcule la paie RÉELLE d'un employé sur une période donnée, à partir de la saisie manuelle
+// mensuelle (jours payés + heures sup, module "Paie") ET des formules du classeur Excel
+// I.P & D (ancienneté auto-calculée, barème IGR progressif, quotient familial, CNPS
+// plafonné...). Fonction unique utilisée par la page "Paie", le bulletin de paie, "Charges
+// sociales" et le "Livre de paie en fin d'année", pour garantir des montants identiques partout.
+// hasData = true si une saisie manuelle existe pour ce mois (sinon le calcul retombe par
+// défaut sur un mois complet, comme si l'employé avait été présent).
 function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, periodEnd: string) {
   // Garde-fou : un employé créé/importé avec des données de salaire incomplètes ou
   // manquantes (ex. document Firestore partiellement écrit) ne doit jamais faire planter
   // toute l'application — on retombe sur des valeurs à 0 plutôt que de lever une exception.
   const c = getComponents(emp);
 
-  const empPresences = presences.filter(p =>
-    p.employeeId === emp.id && p.date >= periodStart && p.date <= periodEnd);
-  const hasData = empPresences.length > 0;
+  const yearMonth = periodStart.slice(0, 7);
+  const override = payrollOverrides.find(o => o.employeeId === emp.id && o.yearMonth === yearMonth);
+  const hasData = !!override;
 
-  const absNonJust = empPresences.filter(p => p.status === 'Absent' && p.justification === 'Non justifié').length;
-  const absJust = empPresences.filter(p => p.status === 'Absent' && p.justification === 'Justifié').length;
-
-  const ot: OvertimeHours = emptyOvertime();
-  empPresences.forEach(p => {
-    const o = p.overtime || { ...emptyOvertime(), h15: p.heuresSup || 0 };
-    ot.h15 += o.h15; ot.h50 += o.h50; ot.h75 += o.h75; ot.h100 += o.h100; ot.h200 += o.h200;
-  });
+  const ot: OvertimeHours = override ? override.overtime : emptyOvertime();
   const heuresSup = ot.h15 + ot.h50 + ot.h75 + ot.h100 + ot.h200;
 
-  // Jours réellement PAYÉS sur la période : "Présent" (1 j), "Congé" (payé, durée saisie),
-  // "Maladie" justifiée (1 j, arrêt maladie payé), "Formation" (durée saisie, considérée comme
-  // du temps de travail). Les "Absent" (justifiées ou non) et les jours SANS AUCUNE saisie ne
-  // sont pas payés — c'est cette dernière règle qui fait la différence avec l'ancien calcul :
-  // un mois où seuls 3 jours de présence ont été pointés sur 30 n'est plus payé comme un mois
-  // complet. Si aucune présence n'a été saisie sur toute la période (mois non encore pointé),
-  // on ne pénalise pas l'employé et on retombe sur un mois complet (comportement par défaut).
-  let joursPayes = JOURS_MOIS_PAIE;
-  if (hasData) {
-    let jp = 0;
-    empPresences.forEach(p => {
-      if (p.status === 'Présent') jp += 1;
-      else if (p.status === 'Congé') jp += (p.duree ?? 1);
-      else if (p.status === 'Maladie' && p.justification === 'Justifié') jp += 1;
-      else if (p.status === 'Formation') jp += (p.duree ?? 1);
-      // 'Absent' (justifié ou non) et 'Non saisi' : 0 jour payé
-    });
-    joursPayes = Math.min(jp, JOURS_MOIS_PAIE);
-  }
+  // Jours réellement payés sur le mois : saisie manuelle dans "Paie" (0 à 30 j). Sans saisie
+  // pour ce mois, l'employé est considéré présent tout le mois (comportement par défaut).
+  const joursPayes = Math.max(0, Math.min(override ? override.joursPayes : JOURS_MOIS_PAIE, JOURS_MOIS_PAIE));
   const joursNonPayes = JOURS_MOIS_PAIE - joursPayes;
 
   // Prime d'ancienneté — calculée automatiquement à la date de fin de période, jamais saisie
@@ -1925,7 +1292,7 @@ function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, per
   const netToPay = social.netAPayer;
 
   return {
-    dailyRate, hourlyRate, absNonJust, absJust, heuresSup, ot, deduction, overtimePay, netToPay,
+    dailyRate, hourlyRate, heuresSup, ot, deduction, overtimePay, netToPay,
     ancienneteAmount, ancienneteRatePct, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated,
     social, hasData,
   };
@@ -1963,7 +1330,7 @@ function PaySlipRow({ code, label, base, taux, gain, retenue }: {
 // rubriques avec codes, cotisations salariales détaillées, retenues fixes, indemnité de
 // transport non imposable, charges patronales indicatives, signatures).
 function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRow; periodStart: string; periodEnd: string; onClose: () => void; }) {
-  const { emp, ot, netToPay, absNonJust, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
+  const { emp, ot, netToPay, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
   const c = getComponents(emp);
   const isCadre = emp.professionalStatus === 'Cadre';
 
@@ -2038,16 +1405,15 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
               <div className="flex justify-between"><span className="text-slate-500">Chef de famille :</span><span className="font-semibold text-slate-700">{emp.chefDeFamille ? 'Oui' : 'Non'}</span></div>
             </div>
 
-            {/* Bandeau jours payés — reflète les présences réellement saisies sur la période */}
+            {/* Bandeau jours payés — reflète la saisie manuelle du mois dans "Paie" */}
             {hasData && joursNonPayes > 0 && (
               <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-[10px] text-amber-800">
-                ⚠ Paie calculée sur <b>{joursPayes} jour(s) payé(s) sur {JOURS_MOIS_PAIE}</b> d'après les présences saisies
-                {absNonJust > 0 ? ` (dont ${absNonJust} j d'absence non justifiée)` : ''} — {joursNonPayes} j non travaillé(s)/non pointé(s) non rémunéré(s).
+                ⚠ Paie calculée sur <b>{joursPayes} jour(s) payé(s) sur {JOURS_MOIS_PAIE}</b> (saisie manuelle du mois) — {joursNonPayes} j non payé(s).
               </div>
             )}
             {!hasData && (
               <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500">
-                ℹ Aucune présence saisie sur cette période dans le module "Présences" — paie calculée sur un mois complet ({JOURS_MOIS_PAIE} j) par défaut.
+                ℹ Aucune saisie manuelle pour ce mois dans "Paie" — paie calculée sur un mois complet ({JOURS_MOIS_PAIE} j) par défaut.
               </div>
             )}
 
@@ -2172,13 +1538,30 @@ function LP_Td({ value, bold, colorClass }: { value: number; bold?: boolean; col
 // ancienneté, situation familiale/parts, retenues fiscales & sociales, salaire net), avec
 // une ligne TOTAUX en pied de tableau. Cliquer sur une ligne ouvre le bulletin de paie.
 function PayePage({ filtered }: { filtered: Employee[] }) {
+  const { version, bump } = useContext(DataVersionContext);
   const [periodStart, setPeriodStart] = useState('2025-06-01');
   const [periodEnd, setPeriodEnd] = useState('2025-06-30');
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
+  const [otEditor, setOtEditor] = useState<{ emp: Employee; overtime: OvertimeHours } | null>(null);
+
+  // Enregistre (ou crée) la saisie manuelle de paie variable d'un employé pour le mois de
+  // periodStart, et prévient toute l'application que les données ont changé (bump).
+  function saveOverride(employeeId: string, patch: Partial<Pick<PayrollOverride, 'joursPayes' | 'overtime'>>) {
+    const yearMonth = periodStart.slice(0, 7);
+    const id = `${employeeId}::${yearMonth}`;
+    let ov = payrollOverrides.find(o => o.id === id);
+    if (!ov) {
+      ov = { id, employeeId, yearMonth, joursPayes: JOURS_MOIS_PAIE, overtime: emptyOvertime() };
+      payrollOverrides.push(ov);
+    }
+    Object.assign(ov, patch);
+    persistDoc('payrollOverrides', id, ov);
+    bump();
+  }
 
   const payroll = useMemo(() => {
     return filtered.map(emp => ({ emp, ...computeEmployeePayrollForPeriod(emp, periodStart, periodEnd) }));
-  }, [filtered, periodStart, periodEnd]);
+  }, [filtered, periodStart, periodEnd, version]);
 
   // Totaux — équivalent de la ligne "TOTAUX" (LIVRE DE PAIE!33)
   const sum = (fn: (r: typeof payroll[number]) => number) => payroll.reduce((a, r) => a + fn(r), 0);
@@ -2216,7 +1599,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
         <span className="text-[10px] text-slate-400 uppercase">Au</span>
         <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        <span className="text-[10px] text-slate-400 ml-2">Cliquez sur une ligne pour ouvrir le bulletin de paie</span>
+        <span className="text-[10px] text-slate-400 ml-2">Jours payés et heures sup. saisis manuellement · cliquez sur une ligne pour ouvrir le bulletin</span>
       </div>
 
       {/* Cartes statistiques globales */}
@@ -2260,7 +1643,8 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Matricule</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="D'après les présences saisies dans le module Présences">Jours payés</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : jours réellement payés sur le mois">Jours payés</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : heures supplémentaires du mois">H. sup</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Sursalaire</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Heure suppl.</th>
@@ -2298,9 +1682,19 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                     <td className="px-2.5 py-2 text-[11px] text-slate-600 whitespace-nowrap">{emp.matricule || '—'}</td>
                     <td className="px-2.5 py-2 text-[11px] font-semibold text-slate-700 whitespace-nowrap">{emp.lastName}</td>
                     <td className="px-2.5 py-2 text-[11px] text-slate-700 whitespace-nowrap">{emp.firstName}</td>
-                    <td className="px-2.5 py-2 text-[11px] text-center whitespace-nowrap">
-                      <span className={cn('font-semibold', r.joursNonPayes > 0 && r.hasData ? 'text-amber-600' : 'text-slate-500')}>{r.joursPayes} j</span>
-                      <span className="text-slate-300"> / {JOURS_MOIS_PAIE}</span>
+                    <td className="px-2.5 py-2 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                      <input type="number" min={0} max={JOURS_MOIS_PAIE} value={r.joursPayes}
+                        onChange={e => saveOverride(emp.id, { joursPayes: Math.max(0, Math.min(JOURS_MOIS_PAIE, Number(e.target.value))) })}
+                        className={cn('w-14 px-1.5 py-1 text-[11px] text-center border rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-300',
+                          r.joursNonPayes > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 font-semibold' : 'border-slate-200 bg-slate-50')} />
+                      <span className="text-slate-300 text-[9px]"> /{JOURS_MOIS_PAIE}</span>
+                    </td>
+                    <td className="px-2.5 py-2 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                      <button onClick={() => setOtEditor({ emp, overtime: r.ot })}
+                        className={cn('px-2 py-1 text-[11px] rounded-lg border font-semibold',
+                          r.heuresSup > 0 ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-slate-50 text-slate-400')}>
+                        {r.heuresSup > 0 ? `${r.heuresSup} h` : '—'}
+                      </button>
                     </td>
                     <LP_Td value={r.baseSalaryProrated} />
                     <LP_Td value={r.sursalaireProrated} />
@@ -2328,11 +1722,11 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                   </tr>
                 );
               })}
-              {payroll.length === 0 && <tr><td colSpan={28} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
+              {payroll.length === 0 && <tr><td colSpan={29} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
-                <td colSpan={5} className="px-2.5 py-2.5 text-[11px] text-slate-700">TOTAUX</td>
+                <td colSpan={6} className="px-2.5 py-2.5 text-[11px] text-slate-700">TOTAUX</td>
                 <LP_Td value={T.base} />
                 <LP_Td value={T.sursalaire} />
                 <LP_Td value={T.heureSuppl} />
@@ -2366,6 +1760,27 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
 
       {/* Fiche de paie (bulletin) */}
       {payslip && <PaySlipModal row={payslip} periodStart={periodStart} periodEnd={periodEnd} onClose={() => setPayslip(null)} />}
+
+      {/* Éditeur d'heures supplémentaires (saisie manuelle, 5 taux de majoration) */}
+      <Modal open={!!otEditor} onClose={() => setOtEditor(null)} title={otEditor ? `Heures sup. — ${otEditor.emp.firstName} ${otEditor.emp.lastName}` : ''}>
+        {otEditor && (
+          <div className="space-y-3">
+            {OVERTIME_RATES.map(r => (
+              <div key={r.key} className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-600 flex-1">Heures à +{r.label}</label>
+                <input type="number" min={0} step={0.5} value={otEditor.overtime[r.key]}
+                  onChange={e => setOtEditor({ ...otEditor, overtime: { ...otEditor.overtime, [r.key]: Math.max(0, Number(e.target.value)) } })}
+                  className="w-24 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+                <span className="text-[9px] text-slate-400 w-4">h</span>
+              </div>
+            ))}
+            <button onClick={() => { saveOverride(otEditor.emp.id, { overtime: otEditor.overtime }); setOtEditor(null); }}
+              className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5">
+              <Ico name="save" size={14} /> Enregistrer
+            </button>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -2560,7 +1975,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
             Charges sociales patronales {periodLabel} — par employé · {months[0]?.label}{months.length > 1 ? ` → ${months[months.length - 1].label}` : ''}
           </h3>
           <p className="text-[11px] text-orange-600 mt-0.5">
-            Montants réels cumulés mois par mois (présences, absences, heures sup.) · CNPS Retraite 7,7% (plaf. {formatFCFA(CNPS_PLAFOND_RETRAITE)}/mois) · Prestations familiales 5% & Accidents du travail {(atRate * 100).toFixed(0)}% (plaf. {formatFCFA(CNPS_PLAFOND_PF_AT)}/mois) · FDFP 1,6%
+            Montants réels cumulés mois par mois (jours payés, heures sup. saisis manuellement) · CNPS Retraite 7,7% (plaf. {formatFCFA(CNPS_PLAFOND_RETRAITE)}/mois) · Prestations familiales 5% & Accidents du travail {(atRate * 100).toFixed(0)}% (plaf. {formatFCFA(CNPS_PLAFOND_PF_AT)}/mois) · FDFP 1,6%
           </p>
         </div>
 
@@ -2617,7 +2032,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
 
       {/* Note légale / avertissement */}
       <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-[11px] text-amber-800 leading-relaxed">
-        ⚠ Ces montants sont calculés à partir des <b>présences réellement saisies</b> pour chaque mois (absences, heures sup.), exactement comme dans le menu "Paie" — puis additionnés mois par mois pour les vues semestrielle et annuelle. Le badge « X/Y mois » indique combien de mois de la période disposent de présences enregistrées ; pour un mois sans aucune saisie, le calcul retombe par défaut sur le salaire de base (comme si l'employé avait été présent tout le mois). Taux CNPS/FDFP indicatifs (retraite 7,7% part patronale, prestations familiales 5%, accidents du travail 2 à 5% selon secteur, FDFP 1,6%) — le plafond CNPS est appliqué mois par mois, conformément à la réglementation. Ces montants correspondent au <b>coût employeur</b>, distinct des retenues salariales déjà affichées sur le bulletin de paie. Faites valider ces montants par un expert-comptable ou directement auprès de la CNPS / du FDFP avant tout versement.
+        ⚠ Ces montants sont calculés à partir de la <b>saisie manuelle</b> de chaque mois (jours payés, heures sup.) dans le menu "Paie" — puis additionnés mois par mois pour les vues semestrielle et annuelle. Le badge « X/Y mois » indique combien de mois de la période disposent d'une saisie ; pour un mois sans aucune saisie, le calcul retombe par défaut sur le salaire de base (comme si l'employé avait été présent tout le mois). Taux CNPS/FDFP indicatifs (retraite 7,7% part patronale, prestations familiales 5%, accidents du travail 2 à 5% selon secteur, FDFP 1,6%) — le plafond CNPS est appliqué mois par mois, conformément à la réglementation. Ces montants correspondent au <b>coût employeur</b>, distinct des retenues salariales déjà affichées sur le bulletin de paie. Faites valider ces montants par un expert-comptable ou directement auprès de la CNPS / du FDFP avant tout versement.
       </div>
     </div>
   );
@@ -2888,7 +2303,7 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
 
       {/* Note légale / avertissement */}
       <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-[11px] text-amber-800 leading-relaxed">
-        ⚠ Montants cumulés mois par mois à partir des <b>présences réellement saisies</b> (comme dans "Paie") ; pour un mois sans aucune saisie, le calcul retombe par défaut sur le salaire de base. Le plafond CNPS ({formatFCFA(CNPS_PLAFOND)}) est appliqué mois par mois, conformément à la réglementation. Faites valider ces montants par un expert-comptable ou directement auprès de la DGI / CNPS / FDFP avant toute déclaration de fin d'année.
+        ⚠ Montants cumulés mois par mois à partir de la <b>saisie manuelle</b> (comme dans "Paie") ; pour un mois sans aucune saisie, le calcul retombe par défaut sur le salaire de base. Le plafond CNPS ({formatFCFA(CNPS_PLAFOND)}) est appliqué mois par mois, conformément à la réglementation. Faites valider ces montants par un expert-comptable ou directement auprès de la DGI / CNPS / FDFP avant toute déclaration de fin d'année.
       </div>
 
       {/* Fiche de paie (bulletin de décembre) */}
@@ -2961,8 +2376,7 @@ async function loadAllFromFirestore() {
   await ensureAnonymousAuth();
   await Promise.all([
     loadCollectionInto('employees', employees, employees.slice()),
-    loadCollectionInto('leaves', leaves, leaves.slice()),
-    loadCollectionInto('presences', presences, presences.slice()),
+    loadCollectionInto('payrollOverrides', payrollOverrides, payrollOverrides.slice()),
     loadCollectionInto('sites', sites, sites.slice()),
     loadUsersCollection(registeredUsers),
   ]);
@@ -3063,6 +2477,13 @@ function AppShell() {
   const [search, setSearch] = useState('');
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(savedUi?.currentUser || null);
 
+  // Version globale des données : incrémentée à chaque ajout/modification/suppression
+  // n'importe où dans l'application (employé, site, saisie de paie...), pour que toutes les
+  // pages déjà ouvertes se recalculent et se mettent à jour immédiatement, sans avoir à
+  // rafraîchir le navigateur.
+  const [dataVersion, setDataVersion] = useState(0);
+  const bump = () => setDataVersion(v => v + 1);
+
   // Sauvegarde locale (cet appareil) à chaque changement de page / utilisateur
   useEffect(() => {
     saveUiState({ page, currentUser });
@@ -3083,8 +2504,6 @@ function AppShell() {
     dashboard: 'Tableau de bord',
     sites: 'Gestion des sites',
     employees: 'Gestion des employés',
-    presence: 'Gestion des présences',
-    leave: 'Gestion des congés',
     paye: 'Paie & Salaires',
     'livre-fin-annee': "Livre de paie — Fin d'année",
     'cs-mensuelles': 'Charges sociales mensuelles',
@@ -3093,10 +2512,13 @@ function AppShell() {
   };
 
   const filtered = useMemo(() => {
-    if (!search) return employees;
+    // .slice() : renvoie toujours une NOUVELLE référence de tableau, même quand la recherche
+    // est vide, afin que les pages qui dépendent de "filtered" (via useMemo) détectent bien
+    // le changement à chaque bump() — sans ça, certaines pages ne se rafraîchissaient pas.
+    if (!search) return employees.slice();
     const q = search.toLowerCase();
     return employees.filter(e => `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email}`.toLowerCase().includes(q));
-  }, [search]);
+  }, [search, dataVersion]);
 
   const onAction = (action: string) => {
     switch (action) {
@@ -3114,6 +2536,7 @@ function AppShell() {
 
   /* ── App principale ── */
   return (
+    <DataVersionContext.Provider value={{ version: dataVersion, bump }}>
     <div className="flex min-h-screen bg-slate-50">
       <Sidebar
         page={page}
@@ -3141,8 +2564,6 @@ function AppShell() {
           <div style={{ display: page === 'dashboard' ? 'block' : 'none' }}><PageErrorBoundary pageName="Tableau de bord"><DashboardPage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
           <div style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'presence' ? 'block' : 'none' }}><PageErrorBoundary pageName="Présences"><PresencePage search={search} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'leave' ? 'block' : 'none' }}><PageErrorBoundary pageName="Congés"><LeavePage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
@@ -3151,5 +2572,6 @@ function AppShell() {
         </div>
       </main>
     </div>
+    </DataVersionContext.Provider>
   );
 }

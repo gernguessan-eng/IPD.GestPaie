@@ -182,16 +182,6 @@ export const CHARGES_PATRONALES = {
   assuranceMaladiePatronaleTaux: 0,  // Part patronale assurance maladie (0 dans le classeur)
 };
 
-export type Leave = {
-  id: string;
-  employeeId: string;
-  type: 'Congé annuel' | 'Congé maladie' | 'Congé maternité' | 'RTT' | 'Congé sans solde';
-  startDate: string;
-  endDate: string;
-  status: 'En attente' | 'Accepté' | 'Refusé';
-  reason: string;
-};
-
 export type Contract = {
   id: string;
   employeeId: string;
@@ -221,20 +211,16 @@ export const OVERTIME_RATES: { key: keyof OvertimeHours; label: string; rate: nu
 
 export const emptyOvertime = (): OvertimeHours => ({ h15: 0, h50: 0, h75: 0, h100: 0, h200: 0 });
 
-export type Presence = {
-  id: string;
+// Saisie manuelle mensuelle de la paie variable par employé (remplace l'ancien calcul
+// automatique basé sur les présences, module retiré). Une entrée par employé et par mois
+// (clé "YYYY-MM"). En l'absence de saisie pour un mois donné, l'employé est considéré
+// présent tout le mois (30 j) et sans heures supplémentaires.
+export type PayrollOverride = {
+  id: string;            // `${employeeId}::${yearMonth}`
   employeeId: string;
-  date: string;
-  status: 'Présent' | 'Absent' | 'Congé' | 'Maladie' | 'Formation' | 'Non saisi';
-  // Pour 'Absent' et 'Maladie' : justification
-  justification?: 'Justifié' | 'Non justifié';
-  // Pour 'Congé' et 'Formation' : durée en jours
-  duree?: number;
-  // Heures supplémentaires saisies manuellement (legacy = 15%)
-  heuresSup?: number;
-  // Heures supplémentaires par taux
-  overtime?: OvertimeHours;
-  notes?: string;
+  yearMonth: string;     // 'YYYY-MM'
+  joursPayes: number;    // jours réellement payés sur le mois (0 à 30), saisie manuelle
+  overtime: OvertimeHours; // heures supplémentaires par taux, saisie manuelle
 };
 
 // ── SITES ───────────────────────────────────────────────────
@@ -321,51 +307,8 @@ export const employees: Employee[] = [
     { birthDate: '1994-10-17', nationality: 'Ivoirienne', gender: 'Femme', chefDeFamille: false, numberOfChildren: 1, congesAnnuelsJours: 27, cnamAmount: 1500 }),
 ];
 
-// ── CONGÉS ────────────────────────────────────────────────
-export const leaves: Leave[] = [
-  { id: 'l1', employeeId: 'e7', type: 'Congé annuel', startDate: '2025-07-14', endDate: '2025-07-28', status: 'Accepté', reason: 'Vacances d été' },
-  { id: 'l2', employeeId: 'e2', type: 'Congé annuel', startDate: '2025-08-01', endDate: '2025-08-14', status: 'En attente', reason: 'Vacances été' },
-  { id: 'l3', employeeId: 'e1', type: 'RTT', startDate: '2025-08-21', endDate: '2025-08-21', status: 'En attente', reason: 'Démarches administratives' },
-  { id: 'l4', employeeId: 'e8', type: 'Congé annuel', startDate: '2025-08-17', endDate: '2025-08-29', status: 'Refusé', reason: 'Période chargée en atelier' },
-  { id: 'l5', employeeId: 'e6', type: 'Congé maladie', startDate: '2025-06-10', endDate: '2025-06-18', status: 'Accepté', reason: 'Arrêt maladie' },
-];
+// ── PAIE VARIABLE (saisie manuelle mensuelle) ─────────────────
+// Vide par défaut : chaque mois non saisi retombe sur "30 jours payés, 0 heure sup".
+export const payrollOverrides: PayrollOverride[] = [];
 
 // ── CONTRATS (gardés en interne) ─────────────────────────────
-export const contracts: Contract[] = [
-  { id: 'c1', employeeId: 'e1', type: 'CDI', startDate: '2018-03-15', endDate: null, documentUrl: '/docs/cdi_dupont.pdf', notes: 'CDI depuis 2018' },
-  { id: 'c2', employeeId: 'e2', type: 'CDI', startDate: '2019-06-01', endDate: null, documentUrl: '/docs/cdi_martin.pdf', notes: '' },
-  { id: 'c3', employeeId: 'e8', type: 'Stage', startDate: '2024-09-02', endDate: '2025-08-29', documentUrl: '/docs/stage_dubois.pdf', notes: 'Apprentissage 1 an' },
-  { id: 'c4', employeeId: 'e9', type: 'CDD', startDate: '2024-02-01', endDate: '2025-01-31', documentUrl: '/docs/cdd_girard.pdf', notes: 'CDD remplacement' },
-  { id: 'c5', employeeId: 'e7', type: 'CDD', startDate: '2024-03-10', endDate: '2025-03-09', documentUrl: '/docs/cdd_leroy.pdf', notes: '' },
-];
-
-// ── PRÉSENCES ──────────────────────────────────────────────
-export const presences: Presence[] = [
-  // Jour exemple : 02/06/2025
-  { id: 'p1', employeeId: 'e1', date: '2025-06-02', status: 'Présent', overtime: { h15: 2, h50: 0, h75: 0, h100: 0, h200: 0 } },
-  { id: 'p2', employeeId: 'e2', date: '2025-06-02', status: 'Présent', overtime: { h15: 0, h50: 2, h75: 0, h100: 0, h200: 0 } },
-  { id: 'p3', employeeId: 'e3', date: '2025-06-02', status: 'Présent', overtime: { h15: 1, h50: 0, h75: 1, h100: 0, h200: 0 } },
-  { id: 'p4', employeeId: 'e4', date: '2025-06-02', status: 'Présent' },
-  { id: 'p5', employeeId: 'e5', date: '2025-06-02', status: 'Absent', justification: 'Non justifié' },
-  { id: 'p6', employeeId: 'e6', date: '2025-06-02', status: 'Présent' },
-  { id: 'p7', employeeId: 'e7', date: '2025-06-02', status: 'Congé', duree: 5 },
-  { id: 'p8', employeeId: 'e8', date: '2025-06-02', status: 'Présent' },
-  { id: 'p9', employeeId: 'e9', date: '2025-06-02', status: 'Présent' },
-  { id: 'p10', employeeId: 'e10', date: '2025-06-02', status: 'Présent' },
-  { id: 'p11', employeeId: 'e11', date: '2025-06-02', status: 'Maladie', justification: 'Justifié' },
-  { id: 'p12', employeeId: 'e12', date: '2025-06-02', status: 'Formation', duree: 3 },
-
-  // Autre jour : 03/06/2025
-  { id: 'p13', employeeId: 'e1', date: '2025-06-03', status: 'Présent' },
-  { id: 'p14', employeeId: 'e2', date: '2025-06-03', status: 'Présent', heuresSup: 3 },
-  { id: 'p15', employeeId: 'e3', date: '2025-06-03', status: 'Absent', justification: 'Justifié' },
-  { id: 'p16', employeeId: 'e7', date: '2025-06-03', status: 'Congé', duree: 5 },
-  { id: 'p17', employeeId: 'e11', date: '2025-06-03', status: 'Maladie', justification: 'Justifié' },
-  { id: 'p18', employeeId: 'e12', date: '2025-06-03', status: 'Formation', duree: 3 },
-  { id: 'p19', employeeId: 'e5', date: '2025-06-03', status: 'Absent', justification: 'Non justifié' },
-
-  // Autre jour : 04/06/2025
-  { id: 'p20', employeeId: 'e1', date: '2025-06-04', status: 'Présent' },
-  { id: 'p21', employeeId: 'e5', date: '2025-06-04', status: 'Absent', justification: 'Non justifié' },
-  { id: 'p22', employeeId: 'e6', date: '2025-06-04', status: 'Présent', heuresSup: 2 },
-];

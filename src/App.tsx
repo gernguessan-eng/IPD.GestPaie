@@ -796,7 +796,6 @@ function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryCompo
         <SalaryLine label="Indemnité de représentation" value={comp.representation} onChange={(v) => set('representation', v)} />
         <SalaryLine label="Prime de responsabilité" value={comp.responsibility} onChange={(v) => set('responsibility', v)} />
         <SalaryLine label="Prime de rendement" value={comp.performance} onChange={(v) => set('performance', v)} />
-        <SalaryLine label="Prime de boisson" value={comp.boisson} onChange={(v) => set('boisson', v)} />
         <SalaryLine label="Autres primes" value={comp.other} onChange={(v) => set('other', v)} />
       </div>
       <div className="flex items-center justify-between px-1 pt-1">
@@ -1570,6 +1569,28 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   const payroll = useMemo(() => {
     return filtered.map(emp => ({ emp, ...computeEmployeePayrollForPeriod(emp, periodStart, periodEnd) }));
   }, [filtered, periodStart, periodEnd, version]);
+
+  // Dès qu'un employé apparaît dans "Paie" pour la période affichée, on enregistre
+  // IMMÉDIATEMENT une saisie par défaut (30 j, 0 h sup) s'il n'en a pas encore — pour que ce
+  // qui est visible à l'écran ("30/30") corresponde toujours à une donnée réellement
+  // enregistrée, et apparaisse donc correctement dans "Livre de paie fin d'année" et
+  // "Charges sociales". Sans ce mécanisme, un employé jamais explicitement modifié restait
+  // invisible dans les cumuls malgré un "30/30" affiché ici, ce qui prêtait à confusion.
+  useEffect(() => {
+    const yearMonth = periodStart.slice(0, 7);
+    let created = false;
+    filtered.forEach(emp => {
+      const exists = payrollOverrides.some(o => o.employeeId === emp.id && o.yearMonth === yearMonth);
+      if (!exists) {
+        const ov: PayrollOverride = { id: `${emp.id}::${yearMonth}`, employeeId: emp.id, yearMonth, joursPayes: JOURS_MOIS_PAIE, overtime: emptyOvertime() };
+        payrollOverrides.push(ov);
+        persistDoc('payrollOverrides', ov.id, ov);
+        created = true;
+      }
+    });
+    if (created) bump();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, periodStart, periodEnd]);
 
   // Totaux — équivalent de la ligne "TOTAUX" (LIVRE DE PAIE!33)
   const sum = (fn: (r: typeof payroll[number]) => number) => payroll.reduce((a, r) => a + fn(r), 0);

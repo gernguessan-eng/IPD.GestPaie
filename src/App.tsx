@@ -1859,6 +1859,11 @@ function cumulateEmployerCharges(emp: Employee, months: { start: string; end: st
   months.forEach(m => {
     const r = computeEmployeePayrollForPeriod(emp, m.start, m.end);
     if (r.hasData) moisAvecDonnees++;
+    // Un mois SANS saisie manuelle dans "Paie" ne doit RIEN ajouter au cumul — sinon les vues
+    // "Livre de paie fin d'année" et "Charges sociales" incluraient un mois complet fictif
+    // (30 j par défaut) pour chaque mois non encore traité, faussant le total par rapport aux
+    // données réellement enregistrées.
+    if (!r.hasData) { detail.push({ label: m.label, brut: 0, totalMensuel: 0, hasData: false }); return; }
     brutCumule += r.social.brut;
     // Le plafond CNPS s'applique MOIS PAR MOIS (règle légale), d'où le calcul mois par mois puis la somme
     const c = computeEmployerSocialCharges(r.social.brut, atRate);
@@ -2077,6 +2082,10 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
   months.forEach(m => {
     const r = computeEmployeePayrollForPeriod(emp, m.start, m.end);
     if (r.hasData) moisAvecDonnees++;
+    // Un mois SANS saisie manuelle dans "Paie" ne doit RIEN ajouter au cumul annuel — sinon
+    // ce registre inclurait un mois complet fictif (30 j par défaut) pour chaque mois non
+    // encore traité, au lieu de refléter uniquement les mois réellement enregistrés.
+    if (!r.hasData) return;
     const s = r.social;
 
     acc.baseSalary += r.baseSalaryProrated;

@@ -1267,7 +1267,12 @@ function computeEmployeePayrollForPeriod(emp: Employee, periodStart: string, per
   const { ratePct: ancienneteRatePct } = computeAncienneteRate(emp.startDate, periodEnd);
   const ancienneteAmount = computeAncienneteAmount(c.baseSalary, emp.startDate, periodEnd);
 
-  const hourlyRate = emp.salary / (JOURS_OUVRES_MOIS * 8);
+  // Garde-fou : si emp.salary est manquant/invalide en base (ex. fiche créée avant une
+  // correction antérieure), on le recalcule à partir des rubriques plutôt que de propager un
+  // NaN qui casserait silencieusement TOUT le brut/imposable/impôts de cet employé (bug
+  // constaté : Total brut, Brut imposable et Impôts brut affichés à 0 malgré un salaire de
+  // base et une prime d'ancienneté corrects).
+  const hourlyRate = (emp.salary || computeSalary(c)) / (JOURS_OUVRES_MOIS * 8);
   const overtimePay = Math.round(
     OVERTIME_RATES.reduce((acc, r) => acc + ot[r.key] * hourlyRate * (1 + r.rate), 0)
   );
@@ -1539,8 +1544,11 @@ function LP_Td({ value, bold, colorClass }: { value: number; bold?: boolean; col
 // une ligne TOTAUX en pied de tableau. Cliquer sur une ligne ouvre le bulletin de paie.
 function PayePage({ filtered }: { filtered: Employee[] }) {
   const { version, bump } = useContext(DataVersionContext);
-  const [periodStart, setPeriodStart] = useState('2025-06-01');
-  const [periodEnd, setPeriodEnd] = useState('2025-06-30');
+  // Mois courant par défaut (et non une date figée) : évite les écarts d'ancienneté/durée
+  // entre "Paie" et le reste de l'appli quand personne n'a encore changé la période.
+  const currentMonth = monthRange(new Date().getFullYear(), new Date().getMonth() + 1);
+  const [periodStart, setPeriodStart] = useState(currentMonth.start);
+  const [periodEnd, setPeriodEnd] = useState(currentMonth.end);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const [otEditor, setOtEditor] = useState<{ emp: Employee; overtime: OvertimeHours } | null>(null);
 
@@ -1877,10 +1885,11 @@ const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet
 // que dans le menu "Paie") — jamais d'une simple multiplication du salaire actuel.
 function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee[]; mode: ChargesPeriodMode; periodLabel: string }) {
   const [atRate, setAtRate] = useState(0.03);
-  // Ancré sur juin 2025 par défaut, car c'est la période où des présences de démonstration existent déjà
-  const [year, setYear] = useState(2025);
-  const [month, setMonth] = useState(6);
-  const [semester, setSemester] = useState<1 | 2>(1);
+  const now = new Date();
+  // Ancré sur le mois/année courants par défaut, pour rester cohérent avec le menu "Paie".
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [semester, setSemester] = useState<1 | 2>(now.getMonth() + 1 <= 6 ? 1 : 2);
 
   // Détermine la liste des mois calendaires réellement agrégés selon le mode choisi
   const months = useMemo(() => {
@@ -2112,9 +2121,9 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
 }
 
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
-  const [year, setYear] = useState(2025);
+  const [year, setYear] = useState(new Date().getFullYear());
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
-  const yearOptions = [2024, 2025, 2026, 2027];
+  const yearOptions = [2024, 2025, 2026, 2027, 2028];
 
   const months = useMemo(() => Array.from({ length: 12 }, (_, i) => monthRange(year, i + 1)), [year]);
   const decEnd = months[11].end;

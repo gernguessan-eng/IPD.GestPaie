@@ -1085,7 +1085,7 @@ function SitesPage({ search }: { search: string }) {
   const [mForm, setMForm] = useState<Partial<Site>>({});
 
   function saveNew() {
-    const ns: Site = { id:`s${Date.now()}`, name:mForm.name||'', address:mForm.address||'', city:mForm.city||'', phone:mForm.phone||'', manager:mForm.manager||'', capacity:Number(mForm.capacity)||10 };
+    const ns: Site = { id:`s${Date.now()}`, name:mForm.name||'', address:mForm.address||'', city:mForm.city||'', phone:mForm.phone||'', manager:mForm.manager||'', capacity:Number(mForm.capacity)||10, cnpsEmployeur:mForm.cnpsEmployeur||'', numeroContribuable:mForm.numeroContribuable||'' };
     sites.push(ns); persistDoc('sites', ns.id, ns); setAddModal(false); bump();
   }
   function saveEdit() {
@@ -1133,6 +1133,10 @@ function SitesPage({ search }: { search: string }) {
           <div className="grid grid-cols-2 gap-3"><InputField label="Adresse" value={mForm.address||''} onChange={v=>setMForm({...mForm,address:v})}/><InputField label="Ville" value={mForm.city||''} onChange={v=>setMForm({...mForm,city:v})}/></div>
           <div className="grid grid-cols-2 gap-3"><InputField label="Téléphone" value={mForm.phone||''} onChange={v=>setMForm({...mForm,phone:v})}/><InputField label="Responsable" value={mForm.manager||''} onChange={v=>setMForm({...mForm,manager:v})}/></div>
           <InputField label="Capacité" type="number" value={mForm.capacity||10} onChange={v=>setMForm({...mForm,capacity:Number(v)})}/>
+          <div className="grid grid-cols-2 gap-3">
+            <InputField label="CNPS Employeur" value={mForm.cnpsEmployeur||''} onChange={v=>setMForm({...mForm,cnpsEmployeur:v})}/>
+            <InputField label="Numéro contribuable" value={mForm.numeroContribuable||''} onChange={v=>setMForm({...mForm,numeroContribuable:v})}/>
+          </div>
           <button onClick={saveNew} className="w-full py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl">Enregistrer</button>
         </div>
       </Modal>
@@ -1143,6 +1147,10 @@ function SitesPage({ search }: { search: string }) {
           <div className="grid grid-cols-2 gap-3"><InputField label="Adresse" value={mForm.address||''} onChange={v=>setMForm({...mForm,address:v})}/><InputField label="Ville" value={mForm.city||''} onChange={v=>setMForm({...mForm,city:v})}/></div>
           <div className="grid grid-cols-2 gap-3"><InputField label="Téléphone" value={mForm.phone||''} onChange={v=>setMForm({...mForm,phone:v})}/><InputField label="Responsable" value={mForm.manager||''} onChange={v=>setMForm({...mForm,manager:v})}/></div>
           <InputField label="Capacité" type="number" value={mForm.capacity||10} onChange={v=>setMForm({...mForm,capacity:Number(v)})}/>
+          <div className="grid grid-cols-2 gap-3">
+            <InputField label="CNPS Employeur" value={mForm.cnpsEmployeur||''} onChange={v=>setMForm({...mForm,cnpsEmployeur:v})}/>
+            <InputField label="Numéro contribuable" value={mForm.numeroContribuable||''} onChange={v=>setMForm({...mForm,numeroContribuable:v})}/>
+          </div>
           <div className="flex gap-2 pt-2">
             <button onClick={saveEdit} className="flex-1 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"><Ico name="save" size={14}/> Enregistrer</button>
             <button onClick={()=>setEditModal(null)} className="px-4 py-2.5 bg-slate-100 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-200">Annuler</button>
@@ -1177,10 +1185,6 @@ function getComponents(emp: Employee): SalaryComponents {
     ...(emp.components || {}),
   };
 }
-
-// Coordonnées employeur affichées sur le bulletin (onglet "MODE D'EMPLOI")
-const COMPANY_CNPS_EMPLOYEUR = '303134';
-const COMPANY_TAX_NUMBER = '1503094N';
 
 // Retenues sociales & fiscales — calcul fidèle au classeur Excel I.P & D (source unique
 // de vérité), utilisée par la page "Paie", le bulletin de paie, "Charges sociales" et le
@@ -1384,10 +1388,10 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                     : <span className="text-[8px] text-slate-400 text-center px-1">LOGO</span>}
                 </div>
                 <div>
-                  <p className="text-xs font-extrabold text-slate-800 uppercase leading-tight">Garage Automobile {site?.name || ''}</p>
+                  <p className="text-xs font-extrabold text-slate-800 uppercase leading-tight">{site?.name || ''}</p>
                   <p className="text-[10px] text-slate-500">{site?.address}, {site?.city}</p>
                   <p className="text-[10px] text-slate-500">Tél : {site?.phone}</p>
-                  <p className="text-[10px] text-slate-500">CNPS employeur : {COMPANY_CNPS_EMPLOYEUR} · N° Contribuable : {COMPANY_TAX_NUMBER}</p>
+                  <p className="text-[10px] text-slate-500">CNPS employeur : {site?.cnpsEmployeur || '—'} · N° Contribuable : {site?.numeroContribuable || '—'}</p>
                 </div>
               </div>
               <div className={cn('text-center px-4 py-2 rounded-lg', isCadre ? 'bg-indigo-100' : 'bg-slate-200')}>

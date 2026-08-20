@@ -6,6 +6,8 @@ export type Site = {
   phone: string;
   manager: string;
   capacity: number;
+  cnpsEmployeur?: string;    // N° CNPS employeur — affiché sur le bulletin de paie des employés de ce site
+  numeroContribuable?: string; // N° Contribuable (DGI) — affiché sur le bulletin de paie des employés de ce site
 };
 
 // ══════════════════════════════════════════════════════════════

@@ -26,6 +26,10 @@ export type SalaryComponents = {
   boisson: number;                // Prime de boisson (extension imposable)
   other: number;                  // Autres primes (extension imposable)
   primeFonctionNonImposable: number; // Prime de fonction NON imposable (I) — issue de l'onglet "MODE D'EMPLOI" (AJ)
+  indemniteResponsabiliteNonTaxable: number; // Indemnité de responsabilité NON taxable : exclue du salaire brut taxable
+                                              // (IGR) ET des impôts sur salaires, MAIS incluse dans la base CNPS
+                                              // (Cotisation Retraite) — rubrique distincte de "primeFonctionNonImposable"
+                                              // qui, elle, est exclue à la fois de l'IGR et de la CNPS.
 };
 
 // Situation familiale — 5 valeurs canoniques utilisées par le barème fiscal
@@ -74,7 +78,8 @@ export type Employee = {
 // (= "TOTAL SALAIRE BRUT" (K) de l'onglet LIVRE DE PAIE : inclut la prime non imposable et le transport)
 export const computeSalary = (c: SalaryComponents): number =>
   c.baseSalary + c.sursalaire + c.seniority + c.housing + c.transport +
-  c.representation + c.responsibility + c.performance + c.boisson + c.other + c.primeFonctionNonImposable;
+  c.representation + c.responsibility + c.performance + c.boisson + c.other + c.primeFonctionNonImposable +
+  c.indemniteResponsabiliteNonTaxable;
 
 // ══════════════════════════════════════════════════════════════
 // MOTEUR FISCAL & SOCIAL — Côte d'Ivoire
@@ -233,8 +238,8 @@ export const sites: Site[] = [
 ];
 
 // Génère une répartition des rubriques de paie réaliste (Côte d'Ivoire)
-function mkComponents(base: number, sursalaire: number, seniority: number, housing: number, transport: number, representation: number, resp: number, perf: number, boisson: number, other: number, primeFonctionNonImposable = 0): SalaryComponents {
-  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, primeFonctionNonImposable };
+function mkComponents(base: number, sursalaire: number, seniority: number, housing: number, transport: number, representation: number, resp: number, perf: number, boisson: number, other: number, primeFonctionNonImposable = 0, indemniteResponsabiliteNonTaxable = 0): SalaryComponents {
+  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable };
 }
 
 // ── EMPLOYÉS ────────────────────────────────────────────────

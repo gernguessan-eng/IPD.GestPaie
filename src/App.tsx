@@ -793,6 +793,7 @@ function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryCompo
         <SalaryLine label="Indemnité de logement" value={comp.housing} onChange={(v) => set('housing', v)} />
         <SalaryLine label="Indemnité de transport (non imposable)" value={comp.transport} onChange={(v) => set('transport', v)} />
         <SalaryLine label="Prime de fonction non imposable" value={comp.primeFonctionNonImposable} onChange={(v) => set('primeFonctionNonImposable', v)} />
+        <SalaryLine label="Indemnité de responsabilité non taxable" value={comp.indemniteResponsabiliteNonTaxable} onChange={(v) => set('indemniteResponsabiliteNonTaxable', v)} />
         <SalaryLine label="Indemnité de représentation" value={comp.representation} onChange={(v) => set('representation', v)} />
         <SalaryLine label="Prime de responsabilité" value={comp.responsibility} onChange={(v) => set('responsibility', v)} />
         <SalaryLine label="Prime de rendement" value={comp.performance} onChange={(v) => set('performance', v)} />
@@ -1182,6 +1183,7 @@ function getComponents(emp: Employee): SalaryComponents {
   return {
     baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0,
     responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0,
+    indemniteResponsabiliteNonTaxable: 0,
     ...(emp.components || {}),
   };
 }
@@ -1191,10 +1193,11 @@ function getComponents(emp: Employee): SalaryComponents {
 // "Livre de paie en fin d'année".
 type SocialDeductions = {
   brutImposable: number;         // (L) base+sursalaire+heures sup+ancienneté+prime de fonction imposable+autres primes, après déduction des absences non justifiées
-  brutNonImposable: number;      // (I) Prime de fonction non imposable
-  totalBrut: number;             // (K) = brutImposable + brutNonImposable
+  brutNonImposable: number;      // (I) Prime de fonction non imposable — exclue de l'IGR ET de la CNPS
+  indemniteRespNonTaxable: number; // Indemnité de responsabilité non taxable — exclue de l'IGR, INCLUSE dans la CNPS
+  totalBrut: number;             // (K) = brutImposable + brutNonImposable + indemniteRespNonTaxable
   brut: number;                  // alias de totalBrut — conservé pour compat avec "Charges sociales"
-  brutSocial: number;            // (M) = brutImposable — base de calcul CNPS/CMU (exclut la prime de fonction non imposable, conforme au bulletin de référence)
+  brutSocial: number;            // (M) base de calcul CNPS/CMU = brutImposable + indemniteRespNonTaxable
   parts: number;                 // Nombre de parts fiscales (quotient familial)
   impotsBrut: number;            // Barème IGR progressif appliqué au brut imposable
   ricf: number;                  // Réduction d'Impôt pour Charges de Famille
@@ -1212,14 +1215,15 @@ type SocialDeductions = {
 function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: number, absenceDeduction: number): SocialDeductions {
   const c = getComponents(emp);
   const brutImposable = Math.max(0, brutImposableAvantAbsence - absenceDeduction);
+  // "Prime de fonction non imposable" : exclue à la fois de l'IGR et de la CNPS.
   const brutNonImposable = c.primeFonctionNonImposable || 0;
-  const totalBrut = brutImposable + brutNonImposable;
-  // Base CNPS/sociale = brut imposable UNIQUEMENT (exclut la prime de fonction non imposable),
-  // conformément au bulletin de référence : la "Cotisation Retraite" y est calculée sur
-  // Salaire + Sursalaire + Ancienneté + Indemnité de responsabilité, SANS l'indemnité non
-  // taxable. "Non imposable" exempte donc à la fois de l'impôt (IGR) ET des cotisations
-  // sociales (CNPS/CMU) — pas seulement de l'impôt.
-  const brutSocial = brutImposable;
+  // "Indemnité de responsabilité non taxable" : exclue de l'IGR (comme ci-dessus) MAIS incluse
+  // dans la base CNPS — rubrique distincte, conforme au bulletin de référence (la "Cotisation
+  // Retraite" y intègre cette indemnité alors que le "Salaire brut taxable" et l'impôt sur
+  // salaires l'excluent).
+  const indemniteRespNonTaxable = c.indemniteResponsabiliteNonTaxable || 0;
+  const totalBrut = brutImposable + brutNonImposable + indemniteRespNonTaxable;
+  const brutSocial = brutImposable + indemniteRespNonTaxable;
 
   const parts = computeFiscalParts(emp.familySituation, emp.numberOfChildren);
   const impotsBrut = computeIGRBrut(brutImposable);
@@ -1234,7 +1238,7 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
   const transportNonImposable = c.transport || 0;
   const netAPayer = Math.round(totalBrut - totalRetenues + transportNonImposable);
 
-  return { brutImposable, brutNonImposable, totalBrut, brut: totalBrut, brutSocial, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer };
+  return { brutImposable, brutNonImposable, indemniteRespNonTaxable, totalBrut, brut: totalBrut, brutSocial, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer };
 }
 
 type PayrollRow = {
@@ -1383,9 +1387,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
             <div className={cn('flex items-start justify-between p-4 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
               <div className="flex items-start gap-3">
                 <div className="h-14 w-14 rounded-lg border border-slate-300 bg-white flex items-center justify-center overflow-hidden shrink-0">
-                  {emp.logoUrl
-                    ? <img src={emp.logoUrl} alt="logo" className="h-full w-full object-contain" />
-                    : <span className="text-[8px] text-slate-400 text-center px-1">LOGO</span>}
+                  <img src={logo} alt="Logo entreprise" className="h-full w-full object-contain" />
                 </div>
                 <div>
                   <p className="text-xs font-extrabold text-slate-800 uppercase leading-tight">{site?.name || ''}</p>
@@ -1448,6 +1450,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 {ancienneteAmount > 0 && <PaySlipRow code="15" label="PRIME ANCIENNETÉ" base={c.baseSalary} taux={`${ancienneteRatePct}%`} gain={ancienneteAmount} />}
                 {primeFonctionImposable > 0 && <PaySlipRow code="20" label="PRIME DE FONCTION" base={primeFonctionImposable} gain={primeFonctionImposable} />}
                 {c.primeFonctionNonImposable > 0 && <PaySlipRow code="21" label="PRIME DE FONCTION NON IMPOSABLE" base={c.primeFonctionNonImposable} gain={c.primeFonctionNonImposable} />}
+                {c.indemniteResponsabiliteNonTaxable > 0 && <PaySlipRow code="26" label="INDEMNITÉ DE RESPONSABILITÉ NON TAXABLE" base={c.indemniteResponsabiliteNonTaxable} gain={c.indemniteResponsabiliteNonTaxable} />}
                 {c.housing > 0 && <PaySlipRow code="22" label="INDEMNITÉ DE LOGEMENT" base={c.housing} gain={c.housing} />}
                 {c.performance > 0 && <PaySlipRow code="23" label="PRIME DE RENDEMENT" base={c.performance} gain={c.performance} />}
                 {c.boisson > 0 && <PaySlipRow code="24" label="PRIME DE BOISSON" base={c.boisson} gain={c.boisson} />}
@@ -1609,6 +1612,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
     heureSuppl: sum(r => r.overtimePay),
     anciennete: sum(r => r.ancienneteAmount),
     primeNonImp: sum(r => getComponents(r.emp).primeFonctionNonImposable),
+    indemniteRespNonTax: sum(r => r.social.indemniteRespNonTaxable),
     primeFonction: sum(r => { const c = getComponents(r.emp); return c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other; }),
     totalBrut: sum(r => r.social.totalBrut),
     brutImposable: sum(r => r.social.brutImposable),
@@ -1688,6 +1692,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Heure suppl.</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Prime ancienneté</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Prime fonction non imp.</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-purple-500 uppercase text-right whitespace-nowrap" title="Exclue de l'IGR, incluse dans la base CNPS">Indem. resp. non taxable</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Prime fonction</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-emerald-600 uppercase text-right whitespace-nowrap">Total brut</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Brut imposable</th>
@@ -1739,6 +1744,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                     <LP_Td value={r.overtimePay} />
                     <LP_Td value={ancienneteAmount} />
                     <LP_Td value={c.primeFonctionNonImposable} />
+                    <LP_Td value={social.indemniteRespNonTaxable} colorClass="text-purple-600" />
                     <LP_Td value={primeFonction} />
                     <LP_Td value={social.totalBrut} bold colorClass="text-emerald-700" />
                     <LP_Td value={social.brutImposable} />
@@ -1760,7 +1766,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                   </tr>
                 );
               })}
-              {payroll.length === 0 && <tr><td colSpan={29} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
+              {payroll.length === 0 && <tr><td colSpan={30} className="px-4 py-8 text-center text-xs text-slate-400">Aucun employé</td></tr>}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
@@ -1770,6 +1776,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <LP_Td value={T.heureSuppl} />
                 <LP_Td value={T.anciennete} />
                 <LP_Td value={T.primeNonImp} />
+                <LP_Td value={T.indemniteRespNonTax} colorClass="text-purple-600" />
                 <LP_Td value={T.primeFonction} />
                 <LP_Td value={T.totalBrut} colorClass="text-emerald-700" />
                 <LP_Td value={T.brutImposable} />
@@ -1894,9 +1901,12 @@ function cumulateEmployerCharges(emp: Employee, months: { start: string; end: st
     // (30 j par défaut) pour chaque mois non encore traité, faussant le total par rapport aux
     // données réellement enregistrées.
     if (!r.hasData) { detail.push({ label: m.label, brut: 0, totalMensuel: 0, hasData: false }); return; }
-    brutCumule += r.social.brut;
+    // Base des charges patronales = BRUT SOCIAL (comme la CNPS salariale), PAS le total des
+    // gains : la prime de fonction non imposable doit rester hors de cette base, alors que
+    // l'indemnité de responsabilité non taxable doit y être incluse (cf. computeSocialDeductions).
+    brutCumule += r.social.brutSocial;
     // Le plafond CNPS s'applique MOIS PAR MOIS (règle légale), d'où le calcul mois par mois puis la somme
-    const c = computeEmployerSocialCharges(r.social.brut, atRate);
+    const c = computeEmployerSocialCharges(r.social.brutSocial, atRate);
     charges.baseRetraite += c.baseRetraite;
     charges.baseFamAT += c.baseFamAT;
     charges.retraitePatronale += c.retraitePatronale;
@@ -1907,7 +1917,7 @@ function cumulateEmployerCharges(emp: Employee, months: { start: string; end: st
     charges.taxeFormationContinue += c.taxeFormationContinue;
     charges.totalFdfp += c.totalFdfp;
     charges.totalMensuel += c.totalMensuel;
-    detail.push({ label: m.label, brut: r.social.brut, totalMensuel: c.totalMensuel, hasData: r.hasData });
+    detail.push({ label: m.label, brut: r.social.brutSocial, totalMensuel: c.totalMensuel, hasData: r.hasData });
   });
 
   return { brutCumule, moisAvecDonnees, totalMois: months.length, charges, detail };

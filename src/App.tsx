@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
+import { startRiseSession, endRiseSession } from './lib/risePresenceSync';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -756,7 +757,7 @@ function StatCard({ label, value, sub, icon, color }: { label: string; value: st
 /* PAGE: EMPLOYÉS                                         */
 /* ══════════════════════════════════════════════════════ */
 
-const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0 });
+const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0, indemniteResponsabiliteNonTaxable: 0 });
 
 // Champ de rubrique de paie
 function SalaryLine({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
@@ -1180,11 +1181,20 @@ const JOURS_MOIS_PAIE = 30;
 // JAMAIS faire planter une page entière — on retombe sur des rubriques à 0 plutôt que de
 // lever une exception. Utilisé partout où "emp.components" est lu dans les calculs de paie.
 function getComponents(emp: Employee): SalaryComponents {
+  const c = emp.components;
   return {
-    baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0,
-    responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0,
-    indemniteResponsabiliteNonTaxable: 0,
-    ...(emp.components || {}),
+    baseSalary: c?.baseSalary ?? 0,
+    sursalaire: c?.sursalaire ?? 0,
+    seniority: c?.seniority ?? 0,
+    housing: c?.housing ?? 0,
+    transport: c?.transport ?? 0,
+    representation: c?.representation ?? 0,
+    responsibility: c?.responsibility ?? 0,
+    performance: c?.performance ?? 0,
+    boisson: c?.boisson ?? 0,
+    other: c?.other ?? 0,
+    primeFonctionNonImposable: c?.primeFonctionNonImposable ?? 0,
+    indemniteResponsabiliteNonTaxable: c?.indemniteResponsabiliteNonTaxable ?? 0,
   };
 }
 
@@ -2547,11 +2557,21 @@ function AppShell() {
     saveUiState({ page, currentUser });
   }, [page, currentUser]);
 
+  // Si la page est rechargée alors que l'utilisateur était déjà connecté
+  // (session restaurée depuis le stockage local), on ouvre une nouvelle
+  // session RISE Presence pour refléter cette reprise de connexion.
+  useEffect(() => {
+    if (currentUser) void startRiseSession({ username: currentUser.username, role: currentUser.role });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleLogin = (user: AuthUser) => {
     setCurrentUser(user);
+    void startRiseSession({ username: user.username, role: user.role });
   };
 
   const handleLogout = () => {
+    void endRiseSession();
     setCurrentUser(null);
     setSearch('');
     setPage('dashboard');

@@ -442,6 +442,7 @@ function Sidebar({
     { key: 'sites', label: 'Sites', icon: 'sites' },
     { key: 'employees', label: 'Employés', icon: 'employees' },
     { key: 'paye', label: 'Paie', icon: 'paye' },
+    { key: 'reconstitution', label: 'Reconstitution', icon: 'search' },
     { key: 'livre-fin-annee', label: "Livre de paie (fin d'année)", icon: 'receipt' },
     {
       key: 'charges-sociales', label: 'Charges sociales', icon: 'shield', children: [
@@ -1842,6 +1843,177 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
 
 
 /* ══════════════════════════════════════════════════════ */
+/* RECONSTITUTION DU SALAIRE DE BASE À PARTIR DU BRUT       */
+/* ══════════════════════════════════════════════════════ */
+// Calcul INVERSE de celui du bulletin (voir computeSocialDeductions / computeEmployeePayrollForPeriod) :
+// on connaît le TOTAL BRUT visé pour un mois complet (30 j, sans absence) et on en déduit le
+// "salaire de base" à inscrire, sachant que toutes les autres rubriques ci-dessous restent
+// FIXES (indépendantes du salaire de base) SAUF la prime d'ancienneté, qui est un pourcentage
+// du salaire de base : TotalBrut = base × (1 + tauxAncienneté) + (somme des rubriques fixes)
+// ⇒ base = (TotalBrut − somme des rubriques fixes) / (1 + tauxAncienneté)
+function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
+  const { bump } = useContext(DataVersionContext);
+  const [employeeId, setEmployeeId] = useState('');
+  const [targetBrut, setTargetBrut] = useState(0);
+  const [sursalaire, setSursalaire] = useState(0);
+  const [primeFonctionImposable, setPrimeFonctionImposable] = useState(0);
+  const [autresPrimesImposables, setAutresPrimesImposables] = useState(0);
+  const [primeFonctionNonImposable, setPrimeFonctionNonImposable] = useState(0);
+  const [indemniteRespNonTaxable, setIndemniteRespNonTaxable] = useState(0);
+  const [heuresSupFcfa, setHeuresSupFcfa] = useState(0);
+  const [ancienneteRatePct, setAncienneteRatePct] = useState(0);
+  const [applied, setApplied] = useState(false);
+
+  const selectedEmp = filtered.find(e => e.id === employeeId) || null;
+
+  // Pré-remplissage à partir d'un employé existant (reste ensuite librement modifiable)
+  function applyEmployeePreset(id: string) {
+    setEmployeeId(id);
+    setApplied(false);
+    const emp = filtered.find(e => e.id === id);
+    if (!emp) return;
+    const c = getComponents(emp);
+    setSursalaire(c.sursalaire);
+    setPrimeFonctionImposable(c.representation + c.responsibility);
+    setAutresPrimesImposables(c.housing + c.performance + c.boisson + c.other);
+    setPrimeFonctionNonImposable(c.primeFonctionNonImposable);
+    setIndemniteRespNonTaxable(c.indemniteResponsabiliteNonTaxable);
+    setHeuresSupFcfa(0);
+    const { ratePct } = computeAncienneteRate(emp.startDate, new Date().toISOString().slice(0, 10));
+    setAncienneteRatePct(ratePct);
+  }
+
+  const fixedSum = sursalaire + primeFonctionImposable + autresPrimesImposables + primeFonctionNonImposable + indemniteRespNonTaxable + heuresSupFcfa;
+  const rate = ancienneteRatePct / 100;
+  const baseReconstitue = targetBrut > 0 ? Math.round((targetBrut - fixedSum) / (1 + rate)) : 0;
+  const ancienneteAmount = Math.floor(baseReconstitue * rate);
+  const totalRecalcule = baseReconstitue + sursalaire + ancienneteAmount + primeFonctionImposable + autresPrimesImposables + primeFonctionNonImposable + indemniteRespNonTaxable + heuresSupFcfa;
+  const ecart = targetBrut - totalRecalcule;
+  const valid = targetBrut > 0 && baseReconstitue > 0;
+
+  function applyToEmployee() {
+    if (!selectedEmp || !valid) return;
+    const emp = employees.find(e => e.id === selectedEmp.id);
+    if (!emp) return;
+    emp.components.baseSalary = baseReconstitue;
+    emp.salary = computeSalary(emp.components);
+    persistDoc('employees', emp.id, emp);
+    bump();
+    setApplied(true);
+  }
+
+  const NumField = ({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint?: string }) => (
+    <div className="space-y-1">
+      <label className="text-xs font-semibold text-slate-600">{label}</label>
+      <input type="number" value={value || ''} onChange={e => { setApplied(false); onChange(Number(e.target.value) || 0); }}
+        placeholder="0"
+        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300" />
+      {hint && <p className="text-[10px] text-slate-400">{hint}</p>}
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <h3 className="text-sm font-bold text-slate-800 mb-1">Reconstituer le salaire de base à partir du brut</h3>
+        <p className="text-xs text-slate-400 mb-5">
+          Saisissez le salaire brut total connu ainsi que les rubriques fixes de l'employé (sursalaire, primes...) —
+          l'outil recalcule le <b>salaire de base</b> pour un mois complet (30 jours), à l'envers du bulletin de paie.
+        </p>
+
+        <div className="space-y-1 mb-5">
+          <label className="text-xs font-semibold text-slate-600">Pré-remplir depuis un employé existant (optionnel)</label>
+          <select value={employeeId} onChange={e => applyEmployeePreset(e.target.value)}
+            className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
+            <option value="">— Saisie manuelle —</option>
+            {filtered.map(e => <option key={e.id} value={e.id}>{e.firstName} {e.lastName} — {e.position}</option>)}
+          </select>
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-4 mb-2">
+          <div className="sm:col-span-2 bg-orange-50 border border-orange-200 rounded-xl p-4">
+            <NumField label="Salaire BRUT TOTAL visé (connu)" value={targetBrut} onChange={setTargetBrut}
+              hint="Le total brut mensuel que vous connaissez déjà (ex : 771 362)." />
+          </div>
+          <NumField label="Sursalaire" value={sursalaire} onChange={setSursalaire} />
+          <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={setAncienneteRatePct}
+            hint={selectedEmp ? "Calculé depuis la date d'embauche de l'employé (modifiable)." : "1% par année de service (2 à 25 ans), 25% max."} />
+          <NumField label="Prime de fonction (imposable)" value={primeFonctionImposable} onChange={setPrimeFonctionImposable}
+            hint="Représentation + responsabilité." />
+          <NumField label="Prime de fonction (non imposable)" value={primeFonctionNonImposable} onChange={setPrimeFonctionNonImposable} />
+          <NumField label="Indemnité de responsabilité (non taxable)" value={indemniteRespNonTaxable} onChange={setIndemniteRespNonTaxable} />
+          <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={setAutresPrimesImposables}
+            hint="Logement, performance, prime exceptionnelle, autre." />
+          <NumField label="Heures supplémentaires (FCFA)" value={heuresSupFcfa} onChange={setHeuresSupFcfa} />
+        </div>
+      </div>
+
+      {targetBrut > 0 && (
+        <div className="bg-white rounded-2xl border border-orange-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 bg-orange-50 border-b border-orange-100 flex items-center justify-between">
+            <h3 className="text-sm font-bold text-orange-800">Résultat de la reconstitution</h3>
+            {selectedEmp && <span className="text-[11px] text-orange-600">Pour {selectedEmp.firstName} {selectedEmp.lastName}</span>}
+          </div>
+
+          <div className="p-5">
+            <div className="flex items-baseline gap-3 mb-5">
+              <span className="text-xs font-semibold text-slate-500">Salaire de base reconstitué :</span>
+              <span className="text-2xl font-extrabold text-orange-700">{formatFCFA(baseReconstitue)}</span>
+              <span className="text-[11px] text-slate-400">(pour 30 jours travaillés)</span>
+            </div>
+
+            <table className="w-full text-left mb-4">
+              <thead><tr className="border-b border-slate-100">
+                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase">Rubrique</th>
+                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Montant</th>
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                <tr><td className="py-2 text-xs text-slate-700">SALAIRE (base)</td><td className="py-2 text-xs text-right font-bold text-slate-800">{formatFCFA(baseReconstitue)}</td></tr>
+                {sursalaire > 0 && <tr><td className="py-2 text-xs text-slate-700">SURSALAIRE</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(sursalaire)}</td></tr>}
+                {ancienneteAmount > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME ANCIENNETÉ ({ancienneteRatePct}%)</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(ancienneteAmount)}</td></tr>}
+                {primeFonctionImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionImposable)}</td></tr>}
+                {autresPrimesImposables > 0 && <tr><td className="py-2 text-xs text-slate-700">AUTRES PRIMES IMPOSABLES</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(autresPrimesImposables)}</td></tr>}
+                {primeFonctionNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION NON IMPOSABLE</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionNonImposable)}</td></tr>}
+                {indemniteRespNonTaxable > 0 && <tr><td className="py-2 text-xs text-slate-700">INDEMNITÉ RESPONSABILITÉ (non taxable)</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(indemniteRespNonTaxable)}</td></tr>}
+                {heuresSupFcfa > 0 && <tr><td className="py-2 text-xs text-slate-700">HEURES SUPPLÉMENTAIRES</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(heuresSupFcfa)}</td></tr>}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-200 font-bold">
+                  <td className="py-2 text-xs text-slate-700">TOTAL BRUT RECALCULÉ</td>
+                  <td className="py-2 text-sm text-right text-orange-700">{formatFCFA(totalRecalcule)}</td>
+                </tr>
+              </tfoot>
+            </table>
+
+            {!valid && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+                Les rubriques fixes saisies dépassent le brut visé — impossible d'obtenir un salaire de base positif. Vérifiez vos montants.
+              </p>
+            )}
+            {valid && Math.abs(ecart) > 1 && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                Écart d'arrondi de {formatFCFA(Math.abs(ecart))} par rapport au brut visé (dû aux arrondis à l'unité près) — négligeable en pratique.
+              </p>
+            )}
+
+            {selectedEmp && valid && (
+              <div className="flex items-center gap-3 mt-4 pt-4 border-t border-slate-100">
+                <button onClick={applyToEmployee}
+                  className="px-4 py-2.5 text-xs font-bold bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-colors shadow-sm shadow-orange-200">
+                  Appliquer ce salaire de base à la fiche de {selectedEmp.firstName}
+                </button>
+                {applied && <span className="text-xs font-semibold text-emerald-600 flex items-center gap-1"><Ico name="checkmark" size={14} /> Enregistré</span>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ══════════════════════════════════════════════════════ */
 /* CHARGES SOCIALES PATRONALES (CNPS + FDFP — Côte d'Ivoire) */
 /* ══════════════════════════════════════════════════════ */
 // NB : ces montants correspondent à la PART PATRONALE (coût employeur),
@@ -2583,6 +2755,7 @@ function AppShell() {
     sites: 'Gestion des sites',
     employees: 'Gestion des employés',
     paye: 'Paie & Salaires',
+    reconstitution: 'Reconstitution du salaire de base',
     'livre-fin-annee': "Livre de paie — Fin d'année",
     'cs-mensuelles': 'Charges sociales mensuelles',
     'cs-semestrielles': 'Charges sociales semestrielles',
@@ -2643,6 +2816,7 @@ function AppShell() {
           <div style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
           <div style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
+          <div style={{ display: page === 'reconstitution' ? 'block' : 'none' }}><PageErrorBoundary pageName="Reconstitution"><ReconstitutionPage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
           <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>

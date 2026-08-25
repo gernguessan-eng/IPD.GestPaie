@@ -1851,6 +1851,22 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
 // FIXES (indépendantes du salaire de base) SAUF la prime d'ancienneté, qui est un pourcentage
 // du salaire de base : TotalBrut = base × (1 + tauxAncienneté) + (somme des rubriques fixes)
 // ⇒ base = (TotalBrut − somme des rubriques fixes) / (1 + tauxAncienneté)
+// Champ numérique — déclaré au niveau module (et non à l'intérieur de ReconstitutionPage) pour
+// que son identité reste stable entre deux rendus. Une fonction composant redéfinie à chaque
+// rendu force React à démonter/remonter le <input> à chaque frappe, ce qui fait perdre le focus
+// et mélange les caractères saisis — c'est ce qui causait le bug de saisie signalé.
+function NumField({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint?: string }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-xs font-semibold text-slate-600">{label}</label>
+      <input type="number" value={value || ''} onChange={e => onChange(Number(e.target.value) || 0)}
+        placeholder="0"
+        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300" />
+      {hint && <p className="text-[10px] text-slate-400">{hint}</p>}
+    </div>
+  );
+}
+
 function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
   const { bump } = useContext(DataVersionContext);
   const [employeeId, setEmployeeId] = useState('');
@@ -1883,6 +1899,9 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
     setAncienneteRatePct(ratePct);
   }
 
+  // Enveloppe chaque setter pour réinitialiser le badge "Enregistré" dès qu'un champ change
+  const upd = (setter: (v: number) => void) => (v: number) => { setApplied(false); setter(v); };
+
   const fixedSum = sursalaire + primeFonctionImposable + autresPrimesImposables + primeFonctionNonImposable + indemniteRespNonTaxable + heuresSupFcfa;
   const rate = ancienneteRatePct / 100;
   const baseReconstitue = targetBrut > 0 ? Math.round((targetBrut - fixedSum) / (1 + rate)) : 0;
@@ -1901,16 +1920,6 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
     bump();
     setApplied(true);
   }
-
-  const NumField = ({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint?: string }) => (
-    <div className="space-y-1">
-      <label className="text-xs font-semibold text-slate-600">{label}</label>
-      <input type="number" value={value || ''} onChange={e => { setApplied(false); onChange(Number(e.target.value) || 0); }}
-        placeholder="0"
-        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300" />
-      {hint && <p className="text-[10px] text-slate-400">{hint}</p>}
-    </div>
-  );
 
   return (
     <div className="space-y-6">
@@ -1932,19 +1941,19 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
 
         <div className="grid sm:grid-cols-2 gap-4 mb-2">
           <div className="sm:col-span-2 bg-orange-50 border border-orange-200 rounded-xl p-4">
-            <NumField label="Salaire BRUT TOTAL visé (connu)" value={targetBrut} onChange={setTargetBrut}
+            <NumField label="Salaire BRUT TOTAL visé (connu)" value={targetBrut} onChange={upd(setTargetBrut)}
               hint="Le total brut mensuel que vous connaissez déjà (ex : 771 362)." />
           </div>
-          <NumField label="Sursalaire" value={sursalaire} onChange={setSursalaire} />
-          <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={setAncienneteRatePct}
+          <NumField label="Sursalaire" value={sursalaire} onChange={upd(setSursalaire)} />
+          <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={upd(setAncienneteRatePct)}
             hint={selectedEmp ? "Calculé depuis la date d'embauche de l'employé (modifiable)." : "1% par année de service (2 à 25 ans), 25% max."} />
-          <NumField label="Prime de fonction (imposable)" value={primeFonctionImposable} onChange={setPrimeFonctionImposable}
+          <NumField label="Prime de fonction (imposable)" value={primeFonctionImposable} onChange={upd(setPrimeFonctionImposable)}
             hint="Représentation + responsabilité." />
-          <NumField label="Prime de fonction (non imposable)" value={primeFonctionNonImposable} onChange={setPrimeFonctionNonImposable} />
-          <NumField label="Indemnité de responsabilité (non taxable)" value={indemniteRespNonTaxable} onChange={setIndemniteRespNonTaxable} />
-          <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={setAutresPrimesImposables}
+          <NumField label="Prime de fonction (non imposable)" value={primeFonctionNonImposable} onChange={upd(setPrimeFonctionNonImposable)} />
+          <NumField label="Indemnité de responsabilité (non taxable)" value={indemniteRespNonTaxable} onChange={upd(setIndemniteRespNonTaxable)} />
+          <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={upd(setAutresPrimesImposables)}
             hint="Logement, performance, prime exceptionnelle, autre." />
-          <NumField label="Heures supplémentaires (FCFA)" value={heuresSupFcfa} onChange={setHeuresSupFcfa} />
+          <NumField label="Heures supplémentaires (FCFA)" value={heuresSupFcfa} onChange={upd(setHeuresSupFcfa)} />
         </div>
       </div>
 

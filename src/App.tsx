@@ -1175,6 +1175,29 @@ const JOURS_OUVRES_MOIS = 22;
 // 30 jours calendaires, comme l'indique l'onglet "ALI" du classeur Excel (colonne NOMBRE = 30,
 // gain = base × nombre/30). C'est cette base de 30 jours qui sert à proratiser la paie en
 // fonction des jours réellement travaillés saisis dans "Présences".
+// ── Réglages généraux persistés (Firestore : parametres/general) ──
+// Objet mutable au niveau module (même schéma que les collections employees/leaves...) :
+// modifié en place puis explicitement persisté via setAccidentTravailTauxPct, pour que la
+// même valeur s'applique partout (bulletin, Livre de paie fin d'année, Charges sociales).
+const parametresGeneraux = { accidentTravailTauxPct: (CHARGES_PATRONALES.accidentTravailTaux * 100) };
+
+async function loadParametresGeneraux() {
+  try {
+    const snap = await getDoc(doc(db, 'parametres', 'general'));
+    if (snap.exists()) {
+      const data = snap.data() as Partial<typeof parametresGeneraux>;
+      if (typeof data.accidentTravailTauxPct === 'number') parametresGeneraux.accidentTravailTauxPct = data.accidentTravailTauxPct;
+    }
+  } catch (err) {
+    console.error('Erreur de chargement Firestore (parametres/general) :', err);
+  }
+}
+
+function setAccidentTravailTauxPct(pct: number) {
+  parametresGeneraux.accidentTravailTauxPct = Math.max(0, pct);
+  persistDoc('parametres', 'general', parametresGeneraux);
+}
+
 const JOURS_MOIS_PAIE = 30;
 
 // Garde-fou global : un employé créé/importé avec des données de salaire incomplètes ou
@@ -1208,7 +1231,7 @@ type SocialDeductions = {
   indemniteRespNonTaxable: number; // Indemnité de responsabilité non taxable — exclue de l'IGR, INCLUSE dans la CNPS
   totalBrut: number;             // (K) = brutImposable + brutNonImposable + indemniteRespNonTaxable
   brut: number;                  // alias de totalBrut — conservé pour compat avec "Charges sociales"
-  brutSocial: number;            // (M) base de calcul CNPS/CMU = brutImposable + indemniteRespNonTaxable
+  brutSocial: number;            // (M) base de calcul CNPS/CMU = totalBrut (brut social = brut total)
   parts: number;                 // Nombre de parts fiscales (quotient familial)
   impotsBrut: number;            // Barème IGR progressif appliqué au brut imposable
   ricf: number;                  // Réduction d'Impôt pour Charges de Famille
@@ -1234,7 +1257,7 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
   // salaires l'excluent).
   const indemniteRespNonTaxable = c.indemniteResponsabiliteNonTaxable || 0;
   const totalBrut = brutImposable + brutNonImposable + indemniteRespNonTaxable;
-  const brutSocial = brutImposable + indemniteRespNonTaxable;
+  const brutSocial = totalBrut;
 
   const parts = computeFiscalParts(emp.familySituation, emp.numberOfChildren);
   const impotsBrut = computeIGRBrut(brutImposable);
@@ -1371,7 +1394,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   const pfBase = Math.min(social.brutSocial, CHARGES_PATRONALES.prestationFamilialeBase);
   const prestationFamiliale = Math.round(pfBase * CHARGES_PATRONALES.prestationFamilialeTaux);
   const atBase = Math.min(social.brutSocial, CHARGES_PATRONALES.accidentTravailBase);
-  const accidentTravail = Math.round(atBase * CHARGES_PATRONALES.accidentTravailTaux);
+  const accidentTravail = Math.round(atBase * (parametresGeneraux.accidentTravailTauxPct / 100));
   const isLocal = Math.round(social.brutSocial * CHARGES_PATRONALES.isLocalTaux);
   const taxeApprentissage = Math.round(social.brutSocial * CHARGES_PATRONALES.taxeApprentissageTaux);
   const taxeFPC = Math.round(social.brutSocial * CHARGES_PATRONALES.taxeFPCTaux);
@@ -1522,7 +1545,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
               <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-[10px] text-slate-600">
                 <div className="flex justify-between"><span>CNPS retraite patronale (7,7%)</span><span className="font-semibold">{formatFCFA(cnpsPatronal)}</span></div>
                 <div className="flex justify-between"><span>Prestation familiale (5,75%)</span><span className="font-semibold">{formatFCFA(prestationFamiliale)}</span></div>
-                <div className="flex justify-between"><span>Accident du travail (2%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
+                <div className="flex justify-between"><span>Accident du travail ({parametresGeneraux.accidentTravailTauxPct}%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
                 <div className="flex justify-between"><span>Part patronale IS local (1,2%)</span><span className="font-semibold">{formatFCFA(isLocal)}</span></div>
                 <div className="flex justify-between"><span>Taxe d'apprentissage (0,4%)</span><span className="font-semibold">{formatFCFA(taxeApprentissage)}</span></div>
                 <div className="flex justify-between"><span>Taxe FPC (1,2%)</span><span className="font-semibold">{formatFCFA(taxeFPC)}</span></div>
@@ -1867,17 +1890,44 @@ function NumField({ label, value, onChange, hint }: { label: string; value: numb
   );
 }
 
+// Employé "gabarit" pour les besoins du calcul de Reconstitution : seuls familySituation,
+// numberOfChildren, cnamAmount, pret, acompte, assurance et components sont réellement lus par
+// computeSocialDeductions — tous les autres champs sont des valeurs neutres sans incidence.
+function makeVirtualEmployee(overrides: Partial<Employee>): Employee {
+  return {
+    id: '__reconstitution__', firstName: '', lastName: '', email: '', phone: '', position: '',
+    department: '', siteId: '', contractType: 'CDI', startDate: '', salary: 0,
+    components: emptyComponents(), status: 'Actif', professionalStatus: 'Cadre', category: '',
+    avatarColor: '#000000',
+    ...overrides,
+  };
+}
+
+// Page "Reconstitution" — calcule le SALAIRE DE BASE à partir du NET À PAYER connu (et non plus
+// du brut), en tenant compte de l'IGR progressif, du quotient familial (RICF) et de toutes les
+// retenues/indemnités du bulletin réel. L'IGR n'étant pas inversible algébriquement (barème par
+// tranches), on procède par recherche dichotomique : on essaie des salaires de base successifs
+// avec exactement la même fonction que le bulletin (computeSocialDeductions), jusqu'à obtenir le
+// net à payer visé à l'unité près.
 function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
   const { bump } = useContext(DataVersionContext);
   const [employeeId, setEmployeeId] = useState('');
-  const [targetBrut, setTargetBrut] = useState(0);
+  const [targetNet, setTargetNet] = useState(0);
+  const [joursTravailles, setJoursTravailles] = useState(JOURS_MOIS_PAIE);
   const [sursalaire, setSursalaire] = useState(0);
+  const [ancienneteRatePct, setAncienneteRatePct] = useState(0);
   const [primeFonctionImposable, setPrimeFonctionImposable] = useState(0);
-  const [autresPrimesImposables, setAutresPrimesImposables] = useState(0);
   const [primeFonctionNonImposable, setPrimeFonctionNonImposable] = useState(0);
+  const [autresPrimesImposables, setAutresPrimesImposables] = useState(0);
   const [indemniteRespNonTaxable, setIndemniteRespNonTaxable] = useState(0);
   const [heuresSupFcfa, setHeuresSupFcfa] = useState(0);
-  const [ancienneteRatePct, setAncienneteRatePct] = useState(0);
+  const [transport, setTransport] = useState(0);
+  const [familySituation, setFamilySituation] = useState<FamilySituation>('Célibataire');
+  const [numberOfChildren, setNumberOfChildren] = useState(0);
+  const [cnamAmount, setCnamAmount] = useState(0);
+  const [pret, setPret] = useState(0);
+  const [acompte, setAcompte] = useState(0);
+  const [assurance, setAssurance] = useState(0);
   const [applied, setApplied] = useState(false);
 
   const selectedEmp = filtered.find(e => e.id === employeeId) || null;
@@ -1894,21 +1944,63 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
     setAutresPrimesImposables(c.housing + c.performance + c.boisson + c.other);
     setPrimeFonctionNonImposable(c.primeFonctionNonImposable);
     setIndemniteRespNonTaxable(c.indemniteResponsabiliteNonTaxable);
+    setTransport(c.transport);
     setHeuresSupFcfa(0);
+    setFamilySituation(emp.familySituation || 'Célibataire');
+    setNumberOfChildren(emp.numberOfChildren ?? 0);
+    setCnamAmount(emp.cnamAmount ?? 0);
+    setPret(emp.pret ?? 0);
+    setAcompte(emp.acompte ?? 0);
+    setAssurance(emp.assurance ?? 0);
     const { ratePct } = computeAncienneteRate(emp.startDate, new Date().toISOString().slice(0, 10));
     setAncienneteRatePct(ratePct);
   }
 
   // Enveloppe chaque setter pour réinitialiser le badge "Enregistré" dès qu'un champ change
   const upd = (setter: (v: number) => void) => (v: number) => { setApplied(false); setter(v); };
+  const updJours = (v: number) => { setApplied(false); setJoursTravailles(Math.max(1, Math.min(JOURS_MOIS_PAIE, v))); };
 
-  const fixedSum = sursalaire + primeFonctionImposable + autresPrimesImposables + primeFonctionNonImposable + indemniteRespNonTaxable + heuresSupFcfa;
-  const rate = ancienneteRatePct / 100;
-  const baseReconstitue = targetBrut > 0 ? Math.round((targetBrut - fixedSum) / (1 + rate)) : 0;
-  const ancienneteAmount = Math.floor(baseReconstitue * rate);
-  const totalRecalcule = baseReconstitue + sursalaire + ancienneteAmount + primeFonctionImposable + autresPrimesImposables + primeFonctionNonImposable + indemniteRespNonTaxable + heuresSupFcfa;
-  const ecart = targetBrut - totalRecalcule;
-  const valid = targetBrut > 0 && baseReconstitue > 0;
+  // Calcule le bulletin complet (exactement comme computeSocialDeductions) pour un salaire de
+  // base candidat donné — utilisé à la fois par la recherche dichotomique et par l'affichage final.
+  function evaluateForBase(trialBase: number) {
+    const joursRatio = joursTravailles / JOURS_MOIS_PAIE;
+    const baseSalaryProrated = Math.round(trialBase * joursRatio);
+    const sursalaireProrated = Math.round(sursalaire * joursRatio);
+    const deduction = (trialBase + sursalaire) - (baseSalaryProrated + sursalaireProrated);
+    const ancienneteAmount = Math.floor(trialBase * (ancienneteRatePct / 100));
+    const brutImposableAvantAbsence = trialBase + sursalaire + heuresSupFcfa + ancienneteAmount + primeFonctionImposable + autresPrimesImposables;
+    const virtualEmp = makeVirtualEmployee({
+      familySituation, numberOfChildren, cnamAmount, pret, acompte, assurance,
+      components: {
+        baseSalary: trialBase, sursalaire, seniority: 0, housing: 0, transport,
+        representation: primeFonctionImposable, responsibility: 0, performance: 0, boisson: 0,
+        other: autresPrimesImposables, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: indemniteRespNonTaxable,
+      },
+    });
+    const social = computeSocialDeductions(virtualEmp, brutImposableAvantAbsence, deduction);
+    return { social, ancienneteAmount, baseSalaryProrated, sursalaireProrated };
+  }
+
+  // Recherche dichotomique : le net à payer croît avec le salaire de base (même si l'IGR est
+  // progressif par tranches, la fonction reste croissante), donc la bissection converge de façon
+  // fiable — contrairement à l'IGR, elle n'a pas besoin d'être inversée analytiquement.
+  const { baseReconstitue, result } = useMemo(() => {
+    if (targetNet <= 0) return { baseReconstitue: 0, result: evaluateForBase(0) };
+    let lo = 0;
+    let hi = Math.max(targetNet * 4, 5_000_000);
+    for (let i = 0; i < 60; i++) {
+      const mid = (lo + hi) / 2;
+      const net = evaluateForBase(mid).social.netAPayer;
+      if (net < targetNet) lo = mid; else hi = mid;
+    }
+    const base = Math.round((lo + hi) / 2);
+    return { baseReconstitue: base, result: evaluateForBase(base) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetNet, joursTravailles, sursalaire, ancienneteRatePct, primeFonctionImposable, primeFonctionNonImposable, autresPrimesImposables, indemniteRespNonTaxable, heuresSupFcfa, transport, familySituation, numberOfChildren, cnamAmount, pret, acompte, assurance]);
+
+  const { social, ancienneteAmount, baseSalaryProrated, sursalaireProrated } = result;
+  const ecart = targetNet - social.netAPayer;
+  const valid = targetNet > 0 && baseReconstitue > 0;
 
   function applyToEmployee() {
     if (!selectedEmp || !valid) return;
@@ -1924,10 +2016,10 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-        <h3 className="text-sm font-bold text-slate-800 mb-1">Reconstituer le salaire de base à partir du brut</h3>
+        <h3 className="text-sm font-bold text-slate-800 mb-1">Reconstituer le salaire de base à partir du net à payer</h3>
         <p className="text-xs text-slate-400 mb-5">
-          Saisissez le salaire brut total connu ainsi que les rubriques fixes de l'employé (sursalaire, primes...) —
-          l'outil recalcule le <b>salaire de base</b> pour un mois complet (30 jours), à l'envers du bulletin de paie.
+          Saisissez le <b>net à payer</b> connu ainsi que les rubriques fixes de l'employé (sursalaire, primes, situation familiale...) —
+          l'outil recalcule le <b>salaire de base</b> en reproduisant exactement le bulletin de paie (IGR progressif, RICF, CNPS...), à l'envers.
         </p>
 
         <div className="space-y-1 mb-5">
@@ -1941,9 +2033,12 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
 
         <div className="grid sm:grid-cols-2 gap-4 mb-2">
           <div className="sm:col-span-2 bg-orange-50 border border-orange-200 rounded-xl p-4">
-            <NumField label="Salaire BRUT TOTAL visé (connu)" value={targetBrut} onChange={upd(setTargetBrut)}
-              hint="Le total brut mensuel que vous connaissez déjà (ex : 771 362)." />
+            <NumField label="NET À PAYER visé (connu)" value={targetNet} onChange={upd(setTargetNet)}
+              hint="Le montant net que vous connaissez déjà (ex : le montant réellement versé à l'employé)." />
           </div>
+
+          <NumField label="Nombre de jours travaillés" value={joursTravailles} onChange={updJours}
+            hint={`Sur ${JOURS_MOIS_PAIE} jours calendaires. Salaire de base et sursalaire sont proratisés en conséquence.`} />
           <NumField label="Sursalaire" value={sursalaire} onChange={upd(setSursalaire)} />
           <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={upd(setAncienneteRatePct)}
             hint={selectedEmp ? "Calculé depuis la date d'embauche de l'employé (modifiable)." : "1% par année de service (2 à 25 ans), 25% max."} />
@@ -1954,10 +2049,31 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
           <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={upd(setAutresPrimesImposables)}
             hint="Logement, performance, prime exceptionnelle, autre." />
           <NumField label="Heures supplémentaires (FCFA)" value={heuresSupFcfa} onChange={upd(setHeuresSupFcfa)} />
+          <NumField label="Indemnité de transport (non imposable)" value={transport} onChange={upd(setTransport)}
+            hint="Ajoutée après les retenues, comme sur le bulletin." />
+
+          <div className="space-y-1">
+            <label className="text-xs font-semibold text-slate-600">Situation familiale</label>
+            <select value={familySituation} onChange={e => { setApplied(false); setFamilySituation(e.target.value as FamilySituation); }}
+              className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300">
+              <option value="Célibataire">Célibataire</option>
+              <option value="Marié(e)">Marié(e)</option>
+              <option value="Divorcé(e)">Divorcé(e)</option>
+              <option value="Veuf">Veuf</option>
+              <option value="Veuve">Veuve</option>
+            </select>
+            <p className="text-[10px] text-slate-400">Détermine le nombre de parts fiscales (RICF).</p>
+          </div>
+          <NumField label="Nombre d'enfants" value={numberOfChildren} onChange={upd(setNumberOfChildren)} />
+
+          <NumField label="CNAM / CMU" value={cnamAmount} onChange={upd(setCnamAmount)} />
+          <NumField label="Prêt (retenue)" value={pret} onChange={upd(setPret)} />
+          <NumField label="Acompte (retenue)" value={acompte} onChange={upd(setAcompte)} />
+          <NumField label="Assurance (retenue)" value={assurance} onChange={upd(setAssurance)} />
         </div>
       </div>
 
-      {targetBrut > 0 && (
+      {targetNet > 0 && (
         <div className="bg-white rounded-2xl border border-orange-200 shadow-sm overflow-hidden">
           <div className="px-5 py-4 bg-orange-50 border-b border-orange-100 flex items-center justify-between">
             <h3 className="text-sm font-bold text-orange-800">Résultat de la reconstitution</h3>
@@ -1965,43 +2081,55 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
           </div>
 
           <div className="p-5">
-            <div className="flex items-baseline gap-3 mb-5">
+            <div className="flex items-baseline gap-3 mb-5 flex-wrap">
               <span className="text-xs font-semibold text-slate-500">Salaire de base reconstitué :</span>
               <span className="text-2xl font-extrabold text-orange-700">{formatFCFA(baseReconstitue)}</span>
-              <span className="text-[11px] text-slate-400">(pour 30 jours travaillés)</span>
+              <span className="text-[11px] text-slate-400">(taux plein — 30 jours ; à inscrire sur la fiche employé)</span>
             </div>
 
             <table className="w-full text-left mb-4">
               <thead><tr className="border-b border-slate-100">
                 <th className="py-2 text-[10px] font-bold text-slate-400 uppercase">Rubrique</th>
+                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Base</th>
+                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Taux/Nb</th>
                 <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Montant</th>
               </tr></thead>
               <tbody className="divide-y divide-slate-100">
-                <tr><td className="py-2 text-xs text-slate-700">SALAIRE (base)</td><td className="py-2 text-xs text-right font-bold text-slate-800">{formatFCFA(baseReconstitue)}</td></tr>
-                {sursalaire > 0 && <tr><td className="py-2 text-xs text-slate-700">SURSALAIRE</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(sursalaire)}</td></tr>}
-                {ancienneteAmount > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME ANCIENNETÉ ({ancienneteRatePct}%)</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(ancienneteAmount)}</td></tr>}
-                {primeFonctionImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionImposable)}</td></tr>}
-                {autresPrimesImposables > 0 && <tr><td className="py-2 text-xs text-slate-700">AUTRES PRIMES IMPOSABLES</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(autresPrimesImposables)}</td></tr>}
-                {primeFonctionNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION NON IMPOSABLE</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionNonImposable)}</td></tr>}
-                {indemniteRespNonTaxable > 0 && <tr><td className="py-2 text-xs text-slate-700">INDEMNITÉ RESPONSABILITÉ (non taxable)</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(indemniteRespNonTaxable)}</td></tr>}
-                {heuresSupFcfa > 0 && <tr><td className="py-2 text-xs text-slate-700">HEURES SUPPLÉMENTAIRES</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(heuresSupFcfa)}</td></tr>}
+                <tr><td className="py-2 text-xs text-slate-700">SALAIRE (base)</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(baseReconstitue)}</td><td className="py-2 text-xs text-right text-slate-500">{joursTravailles} j</td><td className="py-2 text-xs text-right font-bold text-slate-800">{formatFCFA(baseSalaryProrated)}</td></tr>
+                {sursalaire > 0 && <tr><td className="py-2 text-xs text-slate-700">SURSALAIRE</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(sursalaire)}</td><td className="py-2 text-xs text-right text-slate-500">{joursTravailles} j</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(sursalaireProrated)}</td></tr>}
+                {ancienneteAmount > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME ANCIENNETÉ</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(baseReconstitue)}</td><td className="py-2 text-xs text-right text-slate-500">{ancienneteRatePct}%</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(ancienneteAmount)}</td></tr>}
+                {primeFonctionImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionImposable)}</td></tr>}
+                {autresPrimesImposables > 0 && <tr><td className="py-2 text-xs text-slate-700">AUTRES PRIMES IMPOSABLES</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(autresPrimesImposables)}</td></tr>}
+                {primeFonctionNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION NON IMPOSABLE</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionNonImposable)}</td></tr>}
+                {indemniteRespNonTaxable > 0 && <tr><td className="py-2 text-xs text-slate-700">INDEMNITÉ RESPONSABILITÉ (non taxable)</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(indemniteRespNonTaxable)}</td></tr>}
+                {heuresSupFcfa > 0 && <tr><td className="py-2 text-xs text-slate-700">HEURES SUPPLÉMENTAIRES</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(heuresSupFcfa)}</td></tr>}
+                <tr className="border-t border-slate-200 font-bold"><td className="py-2 text-xs text-slate-700">TOTAL BRUT</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-emerald-700">{formatFCFA(social.totalBrut)}</td></tr>
+                <tr><td className="py-2 text-xs text-red-600">Impôts brut (barème IGR)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.impotsBrut)}</td></tr>
+                {social.ricf > 0 && <tr><td className="py-2 text-xs text-red-600">RICF ({social.parts} parts)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">+ {formatFCFA(social.ricf)}</td></tr>}
+                <tr><td className="py-2 text-xs text-red-600">ITS (impôt sur salaires)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.its)}</td></tr>
+                <tr><td className="py-2 text-xs text-red-600">CNPS (6,3%)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.cnps)}</td></tr>
+                {social.cnam > 0 && <tr><td className="py-2 text-xs text-red-600">CNAM / CMU</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.cnam)}</td></tr>}
+                {social.pret > 0 && <tr><td className="py-2 text-xs text-red-600">Prêt</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.pret)}</td></tr>}
+                {social.acompte > 0 && <tr><td className="py-2 text-xs text-red-600">Acompte</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.acompte)}</td></tr>}
+                {social.assurance > 0 && <tr><td className="py-2 text-xs text-red-600">Assurance</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.assurance)}</td></tr>}
+                {social.transportNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">Indemnité transport</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-slate-600">+ {formatFCFA(social.transportNonImposable)}</td></tr>}
               </tbody>
               <tfoot>
-                <tr className="border-t-2 border-slate-200 font-bold">
-                  <td className="py-2 text-xs text-slate-700">TOTAL BRUT RECALCULÉ</td>
-                  <td className="py-2 text-sm text-right text-orange-700">{formatFCFA(totalRecalcule)}</td>
+                <tr className="border-t-2 border-slate-200 bg-slate-50 font-bold">
+                  <td colSpan={3} className="py-2 text-xs text-slate-700">NET À PAYER RECALCULÉ</td>
+                  <td className="py-2 text-sm text-right text-orange-700">{formatFCFA(social.netAPayer)}</td>
                 </tr>
               </tfoot>
             </table>
 
             {!valid && (
               <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-                Les rubriques fixes saisies dépassent le brut visé — impossible d'obtenir un salaire de base positif. Vérifiez vos montants.
+                Les retenues et rubriques fixes saisies dépassent le net visé — impossible d'obtenir un salaire de base positif. Vérifiez vos montants.
               </p>
             )}
             {valid && Math.abs(ecart) > 1 && (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-                Écart d'arrondi de {formatFCFA(Math.abs(ecart))} par rapport au brut visé (dû aux arrondis à l'unité près) — négligeable en pratique.
+                Écart d'arrondi de {formatFCFA(Math.abs(ecart))} par rapport au net visé (dû aux arrondis à l'unité près) — négligeable en pratique.
               </p>
             )}
 
@@ -2022,6 +2150,7 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
 }
 
 
+
 /* ══════════════════════════════════════════════════════ */
 /* CHARGES SOCIALES PATRONALES (CNPS + FDFP — Côte d'Ivoire) */
 /* ══════════════════════════════════════════════════════ */
@@ -2039,13 +2168,9 @@ const TAUX_PRESTATIONS_FAMILIALES = 0.05;  // 5% dont 0,75% assurance maternité
 const TAUX_TAXE_APPRENTISSAGE = 0.004;     // 0,4% — FDFP, Taxe d'Apprentissage (TA)
 const TAUX_FORMATION_CONTINUE = 0.012;     // 1,2% — FDFP, Taxe additionnelle Formation Professionnelle Continue (TFPC)
 
-// Taux Accidents du Travail / Maladies Professionnelles — variable selon le secteur d'activité (2% à 5%)
-const AT_RATE_OPTIONS: { value: number; label: string }[] = [
-  { value: 0.02, label: '2% — Risque faible' },
-  { value: 0.03, label: '3% — Risque modéré (atelier / garage)' },
-  { value: 0.04, label: '4% — Risque élevé' },
-  { value: 0.05, label: '5% — Risque maximal' },
-];
+// Le taux Accidents du Travail / Maladies Professionnelles est désormais un réglage global
+// modifiable et persisté (voir parametresGeneraux / setAccidentTravailTauxPct plus haut),
+// partagé entre le bulletin, "Charges sociales" et le "Livre de paie en fin d'année".
 
 type EmployerSocialCharges = {
   baseRetraite: number; baseFamAT: number;
@@ -2120,12 +2245,16 @@ const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet
 // Les montants proviennent TOUJOURS de la paie réelle calculée mois par mois (mêmes présences
 // que dans le menu "Paie") — jamais d'une simple multiplication du salaire actuel.
 function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee[]; mode: ChargesPeriodMode; periodLabel: string }) {
-  const [atRate, setAtRate] = useState(0.03);
+  const { version, bump } = useContext(DataVersionContext);
   const now = new Date();
   // Ancré sur le mois/année courants par défaut, pour rester cohérent avec le menu "Paie".
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [semester, setSemester] = useState<1 | 2>(now.getMonth() + 1 <= 6 ? 1 : 2);
+  // Taux Accidents du Travail : réglage GLOBAL persisté (parametres/general), partagé avec le
+  // bulletin de paie et le Livre de paie en fin d'année — le modifier ici le modifie partout.
+  const atRatePct = parametresGeneraux.accidentTravailTauxPct;
+  const atRate = atRatePct / 100;
 
   // Détermine la liste des mois calendaires réellement agrégés selon le mode choisi
   const months = useMemo(() => {
@@ -2139,7 +2268,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateEmployerCharges(emp, months, atRate) })),
-    [filtered, months, atRate]
+    [filtered, months, atRate, version]
   );
 
   const totalCnps = rows.reduce((a, r) => a + r.charges.totalCnps, 0);
@@ -2207,10 +2336,11 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
 
         <Ico name="shield" size={18} className="text-orange-500" />
         <span className="text-xs font-bold text-slate-700">Taux Accidents du travail :</span>
-        <select value={atRate} onChange={e => setAtRate(Number(e.target.value))}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
-          {AT_RATE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+        <input type="number" min={0} max={100} step={0.5} value={atRatePct}
+          onChange={e => { setAccidentTravailTauxPct(Number(e.target.value) || 0); bump(); }}
+          className="w-20 px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+        <span className="text-xs text-slate-500">%</span>
+        <span className="text-[10px] text-slate-400">(réglage commun à toute l'application — bulletin, Livre de paie fin d'année inclus)</span>
       </div>
 
       {/* Tableau détaillé par employé */}
@@ -2346,7 +2476,7 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
     const pfBase = Math.min(s.brutSocial, CHARGES_PATRONALES.prestationFamilialeBase);
     const prestationFamiliale = Math.round(pfBase * CHARGES_PATRONALES.prestationFamilialeTaux);
     const atBase = Math.min(s.brutSocial, CHARGES_PATRONALES.accidentTravailBase);
-    const accidentTravail = Math.round(atBase * CHARGES_PATRONALES.accidentTravailTaux);
+    const accidentTravail = Math.round(atBase * (parametresGeneraux.accidentTravailTauxPct / 100));
     const cnpsPatronal = computeCNPSPatronal(s.brutSocial);
     const totalCnpsPatronal = prestationFamiliale + accidentTravail + cnpsPatronal;
     const totalGeneral = totalImpotPatronal + totalCnpsPatronal;
@@ -2361,6 +2491,7 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
 }
 
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
+  const { version } = useContext(DataVersionContext);
   const [year, setYear] = useState(new Date().getFullYear());
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const yearOptions = [2024, 2025, 2026, 2027, 2028];
@@ -2370,7 +2501,7 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateAnnualPayroll(emp, months) })),
-    [filtered, months]
+    [filtered, months, version]
   );
 
   const sum = (fn: (r: typeof rows[number]) => number) => rows.reduce((a, r) => a + fn(r), 0);
@@ -2428,7 +2559,7 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
         <div className="px-5 py-4 bg-orange-50 border-b border-orange-100">
           <h3 className="text-sm font-bold text-orange-800">Livre de paie en fin d'année — Permanents — Cumul {year}</h3>
           <p className="text-[11px] text-orange-600 mt-0.5">
-            Reprend le "Livre de paie" mois par mois (Janvier → Décembre) et y ajoute les charges patronales : ISP 1,2% · FDFP (Taxe d'apprentissage 0,4% + Taxe FPC 1,2%) · Prestations familiales &amp; accident du travail 5,75%/2% (plaf. {formatFCFA(CHARGES_PATRONALES.prestationFamilialeBase)}) · Caisse de retraite patronale 7,7% (plaf. {formatFCFA(CNPS_PLAFOND)})
+            Reprend le "Livre de paie" mois par mois (Janvier → Décembre) et y ajoute les charges patronales : ISP 1,2% · FDFP (Taxe d'apprentissage 0,4% + Taxe FPC 1,2%) · Prestations familiales 5,75% &amp; accident du travail {parametresGeneraux.accidentTravailTauxPct}% (plaf. {formatFCFA(CHARGES_PATRONALES.prestationFamilialeBase)}, réglable dans "Charges sociales") · Caisse de retraite patronale 7,7% (plaf. {formatFCFA(CNPS_PLAFOND)})
           </p>
         </div>
 
@@ -2628,6 +2759,7 @@ async function loadAllFromFirestore() {
     loadCollectionInto('payrollOverrides', payrollOverrides, payrollOverrides.slice()),
     loadCollectionInto('sites', sites, sites.slice()),
     loadUsersCollection(registeredUsers),
+    loadParametresGeneraux(),
   ]);
 }
 

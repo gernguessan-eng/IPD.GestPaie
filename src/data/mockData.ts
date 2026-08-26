@@ -77,9 +77,9 @@ export type Employee = {
 // Helper pour calculer le salaire total à partir des rubriques
 // (= "TOTAL SALAIRE BRUT" (K) de l'onglet LIVRE DE PAIE : inclut la prime non imposable et le transport)
 export const computeSalary = (c: SalaryComponents): number =>
-  c.baseSalary + c.sursalaire + c.seniority + c.housing + c.transport +
-  c.representation + c.responsibility + c.performance + c.boisson + c.other + c.primeFonctionNonImposable +
-  c.indemniteResponsabiliteNonTaxable;
+  (c.baseSalary || 0) + (c.sursalaire || 0) + (c.seniority || 0) + (c.housing || 0) + (c.transport || 0) +
+  (c.representation || 0) + (c.responsibility || 0) + (c.performance || 0) + (c.boisson || 0) + (c.other || 0) + (c.primeFonctionNonImposable || 0) +
+  (c.indemniteResponsabiliteNonTaxable || 0);
 
 // ══════════════════════════════════════════════════════════════
 // MOTEUR FISCAL & SOCIAL — Côte d'Ivoire

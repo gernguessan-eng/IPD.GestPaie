@@ -442,7 +442,6 @@ function Sidebar({
     { key: 'sites', label: 'Sites', icon: 'sites' },
     { key: 'employees', label: 'Employés', icon: 'employees' },
     { key: 'paye', label: 'Paie', icon: 'paye' },
-    { key: 'reconstitution', label: 'Reconstitution', icon: 'search' },
     { key: 'livre-fin-annee', label: "Livre de paie (fin d'année)", icon: 'receipt' },
     {
       key: 'charges-sociales', label: 'Charges sociales', icon: 'shield', children: [
@@ -451,6 +450,7 @@ function Sidebar({
         { key: 'cs-annuelles', label: 'C.S annuelles' },
       ]
     },
+    { key: 'reconstitution', label: 'Reconstitution', icon: 'search' },
   ];
 
   const [expandedMenu, setExpandedMenu] = useState<string | null>(null);
@@ -957,7 +957,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
 
   function openEdit(emp: Employee) {
     setForm({ ...emp });
-    setComp({ ...emp.components });
+    setComp(getComponents(emp));
     setEditModal(emp);
   }
   function doEdit() {

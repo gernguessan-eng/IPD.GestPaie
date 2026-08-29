@@ -676,10 +676,62 @@ function formatMoney(n: number | null | undefined): string {
 /* PAGE: DASHBOARD                                        */
 /* ══════════════════════════════════════════════════════ */
 
+// Supprime les restes de données de démo dans Firestore, sans toucher aux données réelles :
+// - "leaves" et "presences" : collections entièrement héritées de l'ancienne version (plus
+//   utilisées par le code actuel) → supprimées en totalité.
+// - "payrollOverrides" : seules les entrées dont l'employeeId ne correspond à AUCUN employé
+//   actuellement dans la collection "employees" sont supprimées (= anciennes données de démo).
+//   Les saisies réelles de vos employés actuels restent intactes.
+async function cleanupDemoData(): Promise<{ deletedLeaves: number; deletedPresences: number; deletedOrphanOverrides: number }> {
+  const [leavesSnap, presencesSnap, overridesSnap, employeesSnap] = await Promise.all([
+    getDocs(collection(db, 'leaves')),
+    getDocs(collection(db, 'presences')),
+    getDocs(collection(db, 'payrollOverrides')),
+    getDocs(collection(db, 'employees')),
+  ]);
+  const validEmployeeIds = new Set(employeesSnap.docs.map(d => d.id));
+
+  const deletions: Promise<void>[] = [];
+  leavesSnap.docs.forEach(d => deletions.push(deleteDoc(d.ref)));
+  presencesSnap.docs.forEach(d => deletions.push(deleteDoc(d.ref)));
+
+  let deletedOrphanOverrides = 0;
+  overridesSnap.docs.forEach(d => {
+    const data = d.data() as { employeeId?: string };
+    if (data.employeeId && !validEmployeeIds.has(data.employeeId)) {
+      deletions.push(deleteDoc(d.ref));
+      deletedOrphanOverrides++;
+    }
+  });
+
+  await Promise.all(deletions);
+  return { deletedLeaves: leavesSnap.size, deletedPresences: presencesSnap.size, deletedOrphanOverrides };
+}
+
 function DashboardPage({ filtered }: { filtered: Employee[] }) {
   const acts = filtered.filter((e) => e.status === 'Actif').length;
   const inLeave = employees.filter((e) => e.status === 'En congé').length;
   const totalSalary = filtered.reduce((acc, e) => acc + e.salary, 0);
+
+  const [showMaintenance, setShowMaintenance] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<{ deletedLeaves: number; deletedPresences: number; deletedOrphanOverrides: number } | null>(null);
+  const [cleanupError, setCleanupError] = useState('');
+
+  async function runCleanup() {
+    if (!window.confirm("Supprimer définitivement les anciennes données de démo (collections \"leaves\"/\"presences\" et entrées de paie orphelines) ? Les données de vos employés actuels ne seront pas touchées.")) return;
+    setCleaning(true);
+    setCleanupError('');
+    setCleanupResult(null);
+    try {
+      const result = await cleanupDemoData();
+      setCleanupResult(result);
+    } catch (err) {
+      setCleanupError(err instanceof Error ? err.message : 'Erreur inconnue');
+    } finally {
+      setCleaning(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -732,6 +784,39 @@ function DashboardPage({ filtered }: { filtered: Employee[] }) {
             );
           })}
         </div>
+      </div>
+
+      {/* Outil de maintenance — nettoyage des restes de données de démo, repliable et discret */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <button onClick={() => setShowMaintenance(v => !v)} className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-700">
+          <Ico name="chevronDown" size={14} className={cn('transition-transform', showMaintenance ? 'rotate-180' : '')} />
+          Outils de maintenance
+        </button>
+        {showMaintenance && (
+          <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
+            <div>
+              <p className="text-xs font-semibold text-slate-700">Nettoyer les anciennes données de démo</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Supprime les collections "leaves"/"presences" (héritées de l'ancienne version, non utilisées) ainsi que les entrées
+                de paie ("payrollOverrides") qui ne correspondent à aucun employé actuel. Vos employés et leurs saisies réelles
+                (jours travaillés, heures sup...) ne sont jamais touchés.
+              </p>
+            </div>
+            <button onClick={runCleanup} disabled={cleaning}
+              className="px-4 py-2 text-xs font-bold bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-xl transition-colors disabled:opacity-50">
+              {cleaning ? 'Nettoyage en cours…' : 'Nettoyer les données de démo'}
+            </button>
+            {cleanupResult && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+                Terminé : {cleanupResult.deletedLeaves} document(s) "leaves", {cleanupResult.deletedPresences} document(s) "presences"
+                et {cleanupResult.deletedOrphanOverrides} entrée(s) de paie orpheline(s) supprimés.
+              </p>
+            )}
+            {cleanupError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">Erreur : {cleanupError}</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

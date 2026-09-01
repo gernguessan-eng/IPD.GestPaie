@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
+import { useState, useMemo, useEffect, useRef, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
 import { startRiseSession, endRiseSession } from './lib/risePresenceSync';
@@ -706,6 +706,144 @@ async function cleanupDemoData(): Promise<{ deletedLeaves: number; deletedPresen
 
   await Promise.all(deletions);
   return { deletedLeaves: leavesSnap.size, deletedPresences: presencesSnap.size, deletedOrphanOverrides };
+}
+
+// ── Export / Import CSV des employés (compatible Excel — séparateur ";", encodage UTF-8 avec BOM) ──
+const EMPLOYEE_CSV_COLUMNS = [
+  'matricule', 'prenom', 'nom', 'poste', 'departement', 'site', 'contrat', 'statut', 'dateEmbauche',
+  'salaireBase', 'sursalaire', 'logement', 'transport', 'primeFonctionImposable', 'primeResponsabilite',
+  'primeRendement', 'primeExceptionnelle', 'autresPrimes', 'primeFonctionNonImposable', 'indemniteResponsabiliteNonTaxable',
+  'situationFamiliale', 'nombreEnfants', 'cnam', 'pret', 'acompte', 'assurance', 'cnpsNumero', 'categorie',
+  'statutProfessionnel', 'email', 'telephone', 'dateNaissance', 'nationalite', 'sexe', 'chefDeFamille', 'congesAnnuelsJours',
+] as const;
+
+function exportEmployeesCSV(list: Employee[]) {
+  const esc = (v: unknown) => {
+    const s = String(v ?? '');
+    return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const rows = list.map(e => {
+    const c = getComponents(e);
+    const siteName = sites.find(s => s.id === e.siteId)?.name || '';
+    return [
+      e.matricule || '', e.firstName, e.lastName, e.position, e.department, siteName, e.contractType, e.status, e.startDate,
+      c.baseSalary, c.sursalaire, c.housing, c.transport, c.representation, c.responsibility,
+      c.performance, c.boisson, c.other, c.primeFonctionNonImposable, c.indemniteResponsabiliteNonTaxable,
+      e.familySituation || '', e.numberOfChildren ?? 0, e.cnamAmount ?? 0, e.pret ?? 0, e.acompte ?? 0, e.assurance ?? 0,
+      e.cnpsNumber || '', e.category || '', e.professionalStatus, e.email || '', e.phone || '',
+      e.birthDate || '', e.nationality || '', e.gender || '', e.chefDeFamille ? 'Oui' : 'Non', e.congesAnnuelsJours ?? '',
+    ].map(esc).join(';');
+  });
+  const csv = '\uFEFF' + [EMPLOYEE_CSV_COLUMNS.join(';'), ...rows].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `employes_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Parseur CSV minimal (séparateur ";", champs entre guillemets) — suffisant pour des fichiers
+// employés/Excel classiques, sans dépendance externe.
+function parseCSVText(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ';') { row.push(field); field = ''; }
+    else if (ch === '\r') { /* ignoré */ }
+    else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else field += ch;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(v => v.trim() !== ''));
+}
+
+// Importe un fichier CSV (même format que l'export). Met à jour un employé existant si son
+// "matricule" correspond à un employé déjà présent, sinon en crée un nouveau.
+async function importEmployeesCSV(file: File): Promise<{ created: number; updated: number; errors: string[] }> {
+  const raw = await file.text();
+  const rows = parseCSVText(raw.replace(/^\uFEFF/, ''));
+  if (!rows.length) return { created: 0, updated: 0, errors: ['Fichier vide.'] };
+  const header = rows[0].map(h => h.trim());
+  const col = (name: string) => header.indexOf(name);
+  let created = 0, updated = 0;
+  const errors: string[] = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const get = (name: string) => { const j = col(name); return j >= 0 ? (r[j] ?? '').trim() : ''; };
+    const num = (name: string) => { const n = Number(get(name).replace(/\s/g, '').replace(',', '.')); return isNaN(n) ? 0 : n; };
+
+    const firstName = get('prenom'), lastName = get('nom');
+    if (!firstName && !lastName) { errors.push(`Ligne ${i + 1} : prénom et nom manquants — ignorée.`); continue; }
+
+    const matricule = get('matricule');
+    const site = sites.find(s => s.name === get('site'));
+    const components: SalaryComponents = {
+      baseSalary: num('salaireBase'), sursalaire: num('sursalaire'), seniority: 0, housing: num('logement'),
+      transport: num('transport'), representation: num('primeFonctionImposable'), responsibility: num('primeResponsabilite'),
+      performance: num('primeRendement'), boisson: num('primeExceptionnelle'), other: num('autresPrimes'),
+      primeFonctionNonImposable: num('primeFonctionNonImposable'), indemniteResponsabiliteNonTaxable: num('indemniteResponsabiliteNonTaxable'),
+    };
+
+    const existing = matricule ? employees.find(e => e.matricule === matricule) : undefined;
+    if (existing) {
+      Object.assign(existing, {
+        firstName, lastName,
+        position: get('poste') || existing.position, department: get('departement') || existing.department,
+        siteId: site?.id || existing.siteId,
+        contractType: (get('contrat') || existing.contractType) as Employee['contractType'],
+        status: (get('statut') || existing.status) as Employee['status'],
+        startDate: get('dateEmbauche') || existing.startDate,
+        familySituation: (get('situationFamiliale') || existing.familySituation) as FamilySituation,
+        numberOfChildren: get('nombreEnfants') !== '' ? num('nombreEnfants') : existing.numberOfChildren,
+        cnamAmount: num('cnam'), pret: num('pret'), acompte: num('acompte'), assurance: num('assurance'),
+        cnpsNumber: get('cnpsNumero') || existing.cnpsNumber, category: get('categorie') || existing.category,
+        professionalStatus: (get('statutProfessionnel') || existing.professionalStatus) as Employee['professionalStatus'],
+        email: get('email') || existing.email, phone: get('telephone') || existing.phone,
+        birthDate: get('dateNaissance') || existing.birthDate, nationality: get('nationalite') || existing.nationality,
+        gender: (get('sexe') || existing.gender) as Employee['gender'],
+        chefDeFamille: get('chefDeFamille') ? get('chefDeFamille').toLowerCase() === 'oui' : existing.chefDeFamille,
+        congesAnnuelsJours: get('congesAnnuelsJours') !== '' ? num('congesAnnuelsJours') : existing.congesAnnuelsJours,
+        components, salary: computeSalary(components),
+      });
+      persistDoc('employees', existing.id, existing);
+      updated++;
+    } else {
+      const newEmp: Employee = {
+        id: `e${Date.now()}_${i}`, firstName, lastName, email: get('email'), phone: get('telephone'),
+        position: get('poste'), department: get('departement'), siteId: site?.id || (sites[0]?.id || ''),
+        contractType: (get('contrat') || 'CDI') as Employee['contractType'],
+        startDate: get('dateEmbauche') || new Date().toISOString().slice(0, 10),
+        salary: computeSalary(components), components,
+        status: (get('statut') || 'Actif') as Employee['status'],
+        professionalStatus: (get('statutProfessionnel') || 'Ouvrier') as Employee['professionalStatus'],
+        category: get('categorie'), matricule: matricule || undefined, cnpsNumber: get('cnpsNumero') || undefined,
+        familySituation: (get('situationFamiliale') || 'Célibataire') as FamilySituation,
+        avatarColor: '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
+        birthDate: get('dateNaissance') || undefined, nationality: get('nationalite') || undefined,
+        gender: (get('sexe') as Employee['gender']) || undefined,
+        chefDeFamille: get('chefDeFamille').toLowerCase() === 'oui',
+        numberOfChildren: num('nombreEnfants'), congesAnnuelsJours: get('congesAnnuelsJours') !== '' ? num('congesAnnuelsJours') : undefined,
+        cnamAmount: num('cnam'), pret: num('pret'), acompte: num('acompte'), assurance: num('assurance'),
+      };
+      employees.push(newEmp);
+      persistDoc('employees', newEmp.id, newEmp);
+      created++;
+    }
+  }
+  return { created, updated, errors };
 }
 
 function DashboardPage({ filtered }: { filtered: Employee[] }) {
@@ -1900,7 +2038,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <LP_Td value={T.totalBrut} colorClass="text-emerald-700" />
                 <LP_Td value={T.brutImposable} />
                 <LP_Td value={T.brutSocial} />
-                <td colSpan={3}></td>
+                <td colSpan={4}></td>
                 <td className="px-2.5 py-2.5 text-[11px] text-slate-500 text-center">{T.enfants}</td>
                 <td className="px-2.5 py-2.5 text-[11px] text-slate-500 text-center">{T.parts}</td>
                 <LP_Td value={T.impotsBrut} colorClass="text-red-600" />
@@ -2997,14 +3135,38 @@ function AppShell() {
     return employees.filter(e => `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email}`.toLowerCase().includes(q));
   }, [search, dataVersion]);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+
   const onAction = (action: string) => {
     switch (action) {
       case 'save': alert('Toutes les données sont déjà enregistrées automatiquement et en temps réel sur le serveur — aucune action manuelle nécessaire.'); break;
       case 'print': window.print(); break;
-      case 'import': alert('Fonctionnalité importer'); break;
-      case 'export': alert('Export en cours...'); break;
+      case 'import':
+        if (page !== 'employees') { alert('L\'import concerne la liste des employés — rendez-vous sur le menu "Employés".'); break; }
+        fileInputRef.current?.click();
+        break;
+      case 'export':
+        if (page !== 'employees') { alert('L\'export concerne pour l\'instant la liste des employés — rendez-vous sur le menu "Employés".'); break; }
+        exportEmployeesCSV(filtered);
+        break;
     }
   };
+
+  async function handleImportFile(file: File) {
+    setImportBusy(true);
+    try {
+      const { created, updated, errors } = await importEmployeesCSV(file);
+      bump();
+      let msg = `Import terminé : ${created} employé(s) créé(s), ${updated} mis à jour.`;
+      if (errors.length) msg += `\n\n${errors.length} ligne(s) ignorée(s) :\n` + errors.slice(0, 10).join('\n');
+      alert(msg);
+    } catch (err) {
+      alert('Erreur lors de l\'import : ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setImportBusy(false);
+    }
+  }
 
   /* ── Page de connexion ── */
   if (!currentUser) {
@@ -3024,6 +3186,17 @@ function AppShell() {
         onLogout={handleLogout}
       />
       <main className="flex-1 lg:ml-60 min-h-screen">
+        <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{ display: 'none' }}
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) void handleImportFile(file);
+            e.target.value = ''; // permet de réimporter le même fichier plus tard si besoin
+          }} />
+        {importBusy && (
+          <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
+            <div className="bg-white rounded-2xl px-6 py-4 shadow-xl text-sm font-semibold text-slate-700">Import en cours…</div>
+          </div>
+        )}
         <TopBar
           title={titles[page]}
           setMobileOpen={setMobileOpen}

@@ -24,7 +24,11 @@ export type SalaryComponents = {
   responsibility: number;         // Prime de responsabilité — composante de la "Prime de fonction" imposable (J)
   performance: number;            // Prime de rendement / performance (extension imposable)
   boisson: number;                // Prime de boisson (extension imposable)
-  other: number;                  // Autres primes (extension imposable)
+  other: number;                  // Autres primes (extension imposable) — TOTAL auto-synchronisé = otherAmount1 + otherAmount2 (compat. formules existantes)
+  otherLabel1?: string;           // Nom personnalisé de la 1ère "Autre prime"
+  otherAmount1: number;           // Montant de la 1ère "Autre prime"
+  otherLabel2?: string;           // Nom personnalisé de la 2e "Autre prime"
+  otherAmount2: number;           // Montant de la 2e "Autre prime"
   primeFonctionNonImposable: number; // Prime de fonction NON imposable (I) — issue de l'onglet "MODE D'EMPLOI" (AJ)
   indemniteResponsabiliteNonTaxable: number; // Indemnité de responsabilité NON taxable : exclue du salaire brut taxable
                                               // (IGR) ET des impôts sur salaires, MAIS incluse dans la base CNPS
@@ -239,7 +243,7 @@ export const sites: Site[] = [
 
 // Génère une répartition des rubriques de paie réaliste (Côte d'Ivoire)
 function mkComponents(base: number, sursalaire: number, seniority: number, housing: number, transport: number, representation: number, resp: number, perf: number, boisson: number, other: number, primeFonctionNonImposable = 0, indemniteResponsabiliteNonTaxable = 0): SalaryComponents {
-  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable };
+  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, otherAmount1: other, otherAmount2: 0, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable };
 }
 
 // ── EMPLOYÉS ────────────────────────────────────────────────

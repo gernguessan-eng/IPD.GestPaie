@@ -712,38 +712,46 @@ async function cleanupDemoData(): Promise<{ deletedLeaves: number; deletedPresen
 const EMPLOYEE_CSV_COLUMNS = [
   'matricule', 'prenom', 'nom', 'poste', 'departement', 'site', 'contrat', 'statut', 'dateEmbauche',
   'salaireBase', 'sursalaire', 'logement', 'transport', 'primeFonctionImposable', 'primeResponsabilite',
-  'primeRendement', 'primeExceptionnelle', 'autresPrimes', 'primeFonctionNonImposable', 'indemniteResponsabiliteNonTaxable',
+  'primeRendement', 'primeExceptionnelle', 'autrePrime1Nom', 'autrePrime1Montant', 'autrePrime2Nom', 'autrePrime2Montant',
+  'primeFonctionNonImposable', 'indemniteResponsabiliteNonTaxable',
   'situationFamiliale', 'nombreEnfants', 'cnam', 'pret', 'acompte', 'assurance', 'cnpsNumero', 'categorie',
   'statutProfessionnel', 'email', 'telephone', 'dateNaissance', 'nationalite', 'sexe', 'chefDeFamille', 'congesAnnuelsJours',
 ] as const;
 
+// Utilitaire CSV générique (compatible Excel — séparateur ";", encodage UTF-8 avec BOM),
+// réutilisé par l'export de chaque menu (Employés, Sites, Paie, Charges sociales...).
+function csvEscape(v: unknown): string {
+  const s = String(v ?? '');
+  return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function downloadCSV(filename: string, headers: readonly string[], rows: unknown[][]) {
+  const csv = '\uFEFF' + [headers.join(';'), ...rows.map(r => r.map(csvEscape).join(';'))].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function exportEmployeesCSV(list: Employee[]) {
-  const esc = (v: unknown) => {
-    const s = String(v ?? '');
-    return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  };
   const rows = list.map(e => {
     const c = getComponents(e);
     const siteName = sites.find(s => s.id === e.siteId)?.name || '';
     return [
       e.matricule || '', e.firstName, e.lastName, e.position, e.department, siteName, e.contractType, e.status, e.startDate,
       c.baseSalary, c.sursalaire, c.housing, c.transport, c.representation, c.responsibility,
-      c.performance, c.boisson, c.other, c.primeFonctionNonImposable, c.indemniteResponsabiliteNonTaxable,
+      c.performance, c.boisson, c.otherLabel1 || '', c.otherAmount1, c.otherLabel2 || '', c.otherAmount2,
+      c.primeFonctionNonImposable, c.indemniteResponsabiliteNonTaxable,
       e.familySituation || '', e.numberOfChildren ?? 0, e.cnamAmount ?? 0, e.pret ?? 0, e.acompte ?? 0, e.assurance ?? 0,
       e.cnpsNumber || '', e.category || '', e.professionalStatus, e.email || '', e.phone || '',
       e.birthDate || '', e.nationality || '', e.gender || '', e.chefDeFamille ? 'Oui' : 'Non', e.congesAnnuelsJours ?? '',
-    ].map(esc).join(';');
+    ];
   });
-  const csv = '\uFEFF' + [EMPLOYEE_CSV_COLUMNS.join(';'), ...rows].join('\r\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `employes_${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  downloadCSV(`employes_${new Date().toISOString().slice(0, 10)}.csv`, EMPLOYEE_CSV_COLUMNS, rows);
 }
 
 // Parseur CSV minimal (séparateur ";", champs entre guillemets) — suffisant pour des fichiers
@@ -790,10 +798,14 @@ async function importEmployeesCSV(file: File): Promise<{ created: number; update
 
     const matricule = get('matricule');
     const site = sites.find(s => s.name === get('site'));
+    const otherAmount1 = num('autrePrime1Montant');
+    const otherAmount2 = num('autrePrime2Montant');
     const components: SalaryComponents = {
       baseSalary: num('salaireBase'), sursalaire: num('sursalaire'), seniority: 0, housing: num('logement'),
       transport: num('transport'), representation: num('primeFonctionImposable'), responsibility: num('primeResponsabilite'),
-      performance: num('primeRendement'), boisson: num('primeExceptionnelle'), other: num('autresPrimes'),
+      performance: num('primeRendement'), boisson: num('primeExceptionnelle'),
+      other: otherAmount1 + otherAmount2, otherAmount1, otherAmount2,
+      otherLabel1: get('autrePrime1Nom') || undefined, otherLabel2: get('autrePrime2Nom') || undefined,
       primeFonctionNonImposable: num('primeFonctionNonImposable'), indemniteResponsabiliteNonTaxable: num('indemniteResponsabiliteNonTaxable'),
     };
 
@@ -883,20 +895,21 @@ function DashboardPage({ filtered }: { filtered: Employee[] }) {
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
         <h3 className="text-sm font-bold text-slate-800 mb-4">Employés par département</h3>
         <div className="space-y-3">
-          {['Mécanique', 'Administration', 'Finance', 'Carrosserie', 'Magasin', 'Direction'].map((dept) => {
+          {Array.from(new Set(filtered.map(e => e.department).filter((d): d is string => !!d))).sort().map((dept, i) => {
             const count = filtered.filter((e) => e.department === dept).length;
             const pct = filtered.length ? Math.round((count / filtered.length) * 100) : 0;
-            const colors: Record<string, string> = { Mécanique: '#6366f1', Administration: '#f59e0b', Finance: '#10b981', Carrosserie: '#8b5cf6', Magasin: '#ec4899', Direction: '#e11d48' };
+            const palette = ['#6366f1', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#e11d48', '#0ea5e9', '#84cc16', '#f97316', '#14b8a6'];
             return (<div key={dept}>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-slate-600">{dept}</span>
                 <span className="text-[11px] font-semibold text-slate-700">{count} <span className="text-slate-400">({pct}%)</span></span>
               </div>
               <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: colors[dept] || '#94a3b8' }} />
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: palette[i % palette.length] }} />
               </div>
             </div>);
           })}
+          {filtered.every(e => !e.department) && <p className="text-xs text-slate-400">Aucun département renseigné pour l'instant.</p>}
         </div>
       </div>
 
@@ -981,7 +994,7 @@ function StatCard({ label, value, sub, icon, color }: { label: string; value: st
 /* PAGE: EMPLOYÉS                                         */
 /* ══════════════════════════════════════════════════════ */
 
-const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0, indemniteResponsabiliteNonTaxable: 0 });
+const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, otherAmount1: 0, otherAmount2: 0, primeFonctionNonImposable: 0, indemniteResponsabiliteNonTaxable: 0 });
 
 // Champ de rubrique de paie
 function SalaryLine({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
@@ -989,6 +1002,22 @@ function SalaryLine({ label, value, onChange }: { label: string; value: number; 
     <div className="flex items-center gap-2">
       <label className="text-[11px] text-slate-600 flex-1">{label}</label>
       <input type="number" min={0} step={5000} value={value || 0} onChange={(e) => onChange(Number(e.target.value))}
+        className="w-32 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+      <span className="text-[9px] text-slate-400 w-8">FCFA</span>
+    </div>
+  );
+}
+
+// Ligne "Autre prime" à nom personnalisable : l'utilisateur saisit lui-même l'intitulé de la
+// prime (ex : "Prime de salissure") en plus du montant — contrairement aux autres rubriques,
+// dont le libellé est fixe.
+function CustomPrimeLine({ index, name, value, onNameChange, onValueChange }: { index: number; name: string; value: number; onNameChange: (v: string) => void; onValueChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)}
+        placeholder={`Autres primes ${index} — nom de la prime`}
+        className="text-[11px] text-slate-600 flex-1 px-2 py-1.5 border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-orange-300 placeholder:text-slate-300" />
+      <input type="number" min={0} step={5000} value={value || 0} onChange={(e) => onValueChange(Number(e.target.value))}
         className="w-32 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
       <span className="text-[9px] text-slate-400 w-8">FCFA</span>
     </div>
@@ -1022,7 +1051,12 @@ function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryCompo
         <SalaryLine label="Indemnité de représentation" value={comp.representation} onChange={(v) => set('representation', v)} />
         <SalaryLine label="Prime de responsabilité" value={comp.responsibility} onChange={(v) => set('responsibility', v)} />
         <SalaryLine label="Prime de rendement" value={comp.performance} onChange={(v) => set('performance', v)} />
-        <SalaryLine label="Autres primes" value={comp.other} onChange={(v) => set('other', v)} />
+        <CustomPrimeLine index={1} name={comp.otherLabel1 || ''} value={comp.otherAmount1}
+          onNameChange={(v) => onChange({ ...comp, otherLabel1: v })}
+          onValueChange={(v) => onChange({ ...comp, otherAmount1: v, other: v + (comp.otherAmount2 || 0) })} />
+        <CustomPrimeLine index={2} name={comp.otherLabel2 || ''} value={comp.otherAmount2}
+          onNameChange={(v) => onChange({ ...comp, otherLabel2: v })}
+          onValueChange={(v) => onChange({ ...comp, otherAmount2: v, other: (comp.otherAmount1 || 0) + v })} />
       </div>
       <div className="flex items-center justify-between px-1 pt-1">
         <span className="text-xs font-bold text-slate-700">SALAIRE BRUT TOTAL</span>
@@ -1325,9 +1359,17 @@ function SitesPage({ search }: { search: string }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-xs text-slate-500">{sitesList.length} site(s)</p>
-        <button onClick={()=>{setMForm({capacity:10});setAddModal(true)}} className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-semibold rounded-xl shadow-sm shadow-orange-200">
-          <Ico name="plus" size={15} /> Ajouter un site
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => downloadCSV(`sites_${new Date().toISOString().slice(0, 10)}.csv`,
+            ['nom', 'adresse', 'ville', 'telephone', 'responsable', 'capacite', 'effectif', 'cnpsEmployeur', 'numeroContribuable'],
+            sitesList.map(s => [s.name, s.address, s.city, s.phone, s.manager, s.capacity, employees.filter(e => e.siteId === s.id).length, s.cnpsEmployeur || '', s.numeroContribuable || '']))}
+            className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50">
+            <Ico name="exportFile" size={14} /> Exporter
+          </button>
+          <button onClick={()=>{setMForm({capacity:10});setAddModal(true)}} className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-semibold rounded-xl shadow-sm shadow-orange-200">
+            <Ico name="plus" size={15} /> Ajouter un site
+          </button>
+        </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
         {sitesList.map(s=>{
@@ -1440,6 +1482,10 @@ function getComponents(emp: Employee): SalaryComponents {
     performance: c?.performance ?? 0,
     boisson: c?.boisson ?? 0,
     other: c?.other ?? 0,
+    otherAmount1: c?.otherAmount1 ?? 0,
+    otherAmount2: c?.otherAmount2 ?? 0,
+    otherLabel1: c?.otherLabel1,
+    otherLabel2: c?.otherLabel2,
     primeFonctionNonImposable: c?.primeFonctionNonImposable ?? 0,
     indemniteResponsabiliteNonTaxable: c?.indemniteResponsabiliteNonTaxable ?? 0,
   };
@@ -1711,7 +1757,8 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 {c.housing > 0 && <PaySlipRow code="22" label="INDEMNITÉ DE LOGEMENT" base={c.housing} gain={c.housing} />}
                 {c.performance > 0 && <PaySlipRow code="23" label="PRIME DE RENDEMENT" base={c.performance} gain={c.performance} />}
                 {c.boisson > 0 && <PaySlipRow code="24" label="PRIME DE BOISSON" base={c.boisson} gain={c.boisson} />}
-                {c.other > 0 && <PaySlipRow code="76" label="GRATIFICATION / AUTRES PRIMES" base={c.other} gain={c.other} />}
+                {c.otherAmount1 > 0 && <PaySlipRow code="76" label={(c.otherLabel1 || 'AUTRE PRIME 1').toUpperCase()} base={c.otherAmount1} gain={c.otherAmount1} />}
+                {c.otherAmount2 > 0 && <PaySlipRow code="77" label={(c.otherLabel2 || 'AUTRE PRIME 2').toUpperCase()} base={c.otherAmount2} gain={c.otherAmount2} />}
 
                 {/* Heures supplémentaires par taux */}
                 {OVERTIME_RATES.map(r => ot[r.key] > 0 && (
@@ -1899,6 +1946,26 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
         <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 ml-2">Jours payés et heures sup. saisis manuellement · cliquez sur une ligne pour ouvrir le bulletin</span>
+        <button onClick={() => {
+          const headers = ['N°', 'Matricule', 'Nom', 'Prénoms', 'Jours payés', 'H. sup', 'Salaire base', 'Sursalaire', 'Heure suppl.',
+            'Prime ancienneté', 'Prime fonction non imp.', 'Indem. resp. non taxable', 'Prime fonction', 'Total brut', 'Brut imposable',
+            'Brut social', 'Date embauche', 'Durée (mois)', 'Taux% anc.', 'Situation fam.', 'Enfants', 'Parts', 'Impôts brut', 'RICF',
+            'ITS', 'CNPS', 'CNAM', 'Prêts', 'Indem. transport', 'Salaire net'];
+          const rows = payroll.map((r, i) => {
+            const c = getComponents(r.emp);
+            const { months } = computeAncienneteRate(r.emp.startDate, periodEnd);
+            const primeFonction = c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other;
+            return [i + 1, r.emp.matricule || '', r.emp.lastName, r.emp.firstName, r.joursPayes, r.heuresSup,
+              r.baseSalaryProrated, r.sursalaireProrated, r.overtimePay, r.ancienneteAmount, c.primeFonctionNonImposable,
+              r.social.indemniteRespNonTaxable, primeFonction, r.social.totalBrut, r.social.brutImposable, r.social.brutSocial,
+              r.emp.startDate, months, r.ancienneteRatePct, r.emp.familySituation || '', r.emp.numberOfChildren ?? 0, r.social.parts,
+              r.social.impotsBrut, r.social.ricf, r.social.its, r.social.cnps, r.social.cnam, r.social.pret,
+              r.social.transportNonImposable, r.netToPay];
+          });
+          downloadCSV(`livre_de_paie_${periodStart}_${periodEnd}.csv`, headers, rows);
+        }} className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50 ml-auto">
+          <Ico name="exportFile" size={14} /> Exporter
+        </button>
       </div>
 
       {/* Cartes statistiques globales */}
@@ -2197,7 +2264,8 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
       components: {
         baseSalary: trialBase, sursalaire, seniority: 0, housing: 0, transport,
         representation: primeFonctionImposable, responsibility: 0, performance: 0, boisson: 0,
-        other: autresPrimesImposables, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: indemniteRespNonTaxable,
+        other: autresPrimesImposables, otherAmount1: autresPrimesImposables, otherAmount2: 0,
+        primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: indemniteRespNonTaxable,
       },
     });
     const social = computeSocialDeductions(virtualEmp, brutImposableAvantAbsence, deduction);

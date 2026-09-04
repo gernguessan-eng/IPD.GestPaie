@@ -1,7 +1,8 @@
-import { useState, useMemo, useEffect, useRef, useContext, createContext, Component } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
 import { startRiseSession, endRiseSession } from './lib/risePresenceSync';
+import { ExportModal, applyPrintColumnFilter, exportCSV, type ExportColumn, type ExportRow } from './lib/exportTools';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -372,6 +373,12 @@ const fmt = (d: string) => new Date(d).toLocaleDateString('fr-FR', { day: 'numer
 const initials = (f: string, l: string) => `${f[0]}${l[0]}`.toUpperCase();
 const cn = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(' ');
 const formatFCFA = (n: number | null | undefined) => (n ?? 0).toLocaleString('fr-FR') + ' FCFA';
+// Formate une date ISO (YYYY-MM-DD) en "JJ/MM/AAAA" pour l'affichage "Période du ... au ..."
+const formatDateFR = (iso: string) => {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+};
 
 /* ─── Icons (inline SVG) ────────────────────────────────── */
 const Icon = ({ d, size = 20, stroke = 2, className = '' }: { d: string; size?: number; stroke?: number; className?: string }) => (
@@ -708,50 +715,44 @@ async function cleanupDemoData(): Promise<{ deletedLeaves: number; deletedPresen
   return { deletedLeaves: leavesSnap.size, deletedPresences: presencesSnap.size, deletedOrphanOverrides };
 }
 
-// ── Export / Import CSV des employés (compatible Excel — séparateur ";", encodage UTF-8 avec BOM) ──
-const EMPLOYEE_CSV_COLUMNS = [
-  'matricule', 'prenom', 'nom', 'poste', 'departement', 'site', 'contrat', 'statut', 'dateEmbauche',
-  'salaireBase', 'sursalaire', 'logement', 'transport', 'primeFonctionImposable', 'primeResponsabilite',
-  'primeRendement', 'primeExceptionnelle', 'autrePrime1Nom', 'autrePrime1Montant', 'autrePrime2Nom', 'autrePrime2Montant',
-  'primeFonctionNonImposable', 'indemniteResponsabiliteNonTaxable',
-  'situationFamiliale', 'nombreEnfants', 'cnam', 'pret', 'acompte', 'assurance', 'cnpsNumero', 'categorie',
-  'statutProfessionnel', 'email', 'telephone', 'dateNaissance', 'nationalite', 'sexe', 'chefDeFamille', 'congesAnnuelsJours',
-] as const;
+// ── Export des employés (CSV/Excel/PDF via le registre partagé) ──
+const EMPLOYEE_EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'matricule', label: 'Matricule' }, { key: 'prenom', label: 'Prénom' }, { key: 'nom', label: 'Nom' },
+  { key: 'poste', label: 'Poste' }, { key: 'departement', label: 'Département' }, { key: 'site', label: 'Site' },
+  { key: 'contrat', label: 'Contrat' }, { key: 'statut', label: 'Statut' }, { key: 'dateEmbauche', label: "Date d'embauche" },
+  { key: 'salaireBase', label: 'Salaire base' }, { key: 'sursalaire', label: 'Sursalaire' }, { key: 'logement', label: 'Logement' },
+  { key: 'transport', label: 'Transport' }, { key: 'primeFonctionImposable', label: 'Indem. représentation' },
+  { key: 'primeResponsabilite', label: 'Prime responsabilité' }, { key: 'primeRendement', label: 'Prime rendement' },
+  { key: 'primeExceptionnelle', label: 'Prime exceptionnelle' }, { key: 'autrePrime1Nom', label: 'Autre prime 1 — nom' },
+  { key: 'autrePrime1Montant', label: 'Autre prime 1 — montant' }, { key: 'autrePrime2Nom', label: 'Autre prime 2 — nom' },
+  { key: 'autrePrime2Montant', label: 'Autre prime 2 — montant' }, { key: 'primeFonctionNonImposable', label: 'Prime fonction non imp.' },
+  { key: 'indemniteResponsabiliteNonTaxable', label: 'Indem. resp. non taxable' }, { key: 'situationFamiliale', label: 'Situation familiale' },
+  { key: 'nombreEnfants', label: "Nombre d'enfants" }, { key: 'cnam', label: 'CNAM' }, { key: 'pret', label: 'Prêt' },
+  { key: 'acompte', label: 'Acompte' }, { key: 'assurance', label: 'Assurance' }, { key: 'cnpsNumero', label: 'N° CNPS' },
+  { key: 'categorie', label: 'Catégorie' }, { key: 'statutProfessionnel', label: 'Statut professionnel' }, { key: 'email', label: 'Email' },
+  { key: 'telephone', label: 'Téléphone' }, { key: 'dateNaissance', label: 'Date de naissance' }, { key: 'nationalite', label: 'Nationalité' },
+  { key: 'sexe', label: 'Sexe' }, { key: 'chefDeFamille', label: 'Chef de famille' }, { key: 'congesAnnuelsJours', label: 'Congés annuels (j)' },
+];
 
-// Utilitaire CSV générique (compatible Excel — séparateur ";", encodage UTF-8 avec BOM),
-// réutilisé par l'export de chaque menu (Employés, Sites, Paie, Charges sociales...).
-function csvEscape(v: unknown): string {
-  const s = String(v ?? '');
-  return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-}
-function downloadCSV(filename: string, headers: readonly string[], rows: unknown[][]) {
-  const csv = '\uFEFF' + [headers.join(';'), ...rows.map(r => r.map(csvEscape).join(';'))].join('\r\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-function exportEmployeesCSV(list: Employee[]) {
-  const rows = list.map(e => {
+function buildEmployeesExportRows(list: Employee[]): ExportRow[] {
+  return list.map(e => {
     const c = getComponents(e);
     const siteName = sites.find(s => s.id === e.siteId)?.name || '';
-    return [
-      e.matricule || '', e.firstName, e.lastName, e.position, e.department, siteName, e.contractType, e.status, e.startDate,
-      c.baseSalary, c.sursalaire, c.housing, c.transport, c.representation, c.responsibility,
-      c.performance, c.boisson, c.otherLabel1 || '', c.otherAmount1, c.otherLabel2 || '', c.otherAmount2,
-      c.primeFonctionNonImposable, c.indemniteResponsabiliteNonTaxable,
-      e.familySituation || '', e.numberOfChildren ?? 0, e.cnamAmount ?? 0, e.pret ?? 0, e.acompte ?? 0, e.assurance ?? 0,
-      e.cnpsNumber || '', e.category || '', e.professionalStatus, e.email || '', e.phone || '',
-      e.birthDate || '', e.nationality || '', e.gender || '', e.chefDeFamille ? 'Oui' : 'Non', e.congesAnnuelsJours ?? '',
-    ];
+    return {
+      matricule: e.matricule || '', prenom: e.firstName, nom: e.lastName, poste: e.position, departement: e.department,
+      site: siteName, contrat: e.contractType, statut: e.status, dateEmbauche: e.startDate,
+      salaireBase: c.baseSalary, sursalaire: c.sursalaire, logement: c.housing, transport: c.transport,
+      primeFonctionImposable: c.representation, primeResponsabilite: c.responsibility, primeRendement: c.performance,
+      primeExceptionnelle: c.boisson, autrePrime1Nom: c.otherLabel1 || '', autrePrime1Montant: c.otherAmount1,
+      autrePrime2Nom: c.otherLabel2 || '', autrePrime2Montant: c.otherAmount2,
+      primeFonctionNonImposable: c.primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: c.indemniteResponsabiliteNonTaxable,
+      situationFamiliale: e.familySituation || '', nombreEnfants: e.numberOfChildren ?? 0, cnam: e.cnamAmount ?? 0,
+      pret: e.pret ?? 0, acompte: e.acompte ?? 0, assurance: e.assurance ?? 0, cnpsNumero: e.cnpsNumber || '',
+      categorie: e.category || '', statutProfessionnel: e.professionalStatus, email: e.email || '', telephone: e.phone || '',
+      dateNaissance: e.birthDate || '', nationalite: e.nationality || '', sexe: e.gender || '',
+      chefDeFamille: e.chefDeFamille ? 'Oui' : 'Non', congesAnnuelsJours: e.congesAnnuelsJours ?? '',
+    };
   });
-  downloadCSV(`employes_${new Date().toISOString().slice(0, 10)}.csv`, EMPLOYEE_CSV_COLUMNS, rows);
 }
 
 // Parseur CSV minimal (séparateur ";", champs entre guillemets) — suffisant pour des fichiers
@@ -1181,6 +1182,11 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
   if (filterDept) list = list.filter((e) => e.department === filterDept);
   const depts = Array.from(new Set(employees.map((e) => e.department)));
 
+  const buildRows = useCallback(() => buildEmployeesExportRows(list), [list]);
+  useEffect(() => {
+    exportRegistry['employees'] = { title: 'Employés', tableClass: 'employees-table', columns: EMPLOYEE_EXPORT_COLUMNS, buildRows };
+  }, [buildRows]);
+
   function openAdd() {
     setForm({
       firstName: '', lastName: '', email: '', phone: '', position: '', department: '', siteId: '', contractType: 'CDI',
@@ -1253,7 +1259,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
+          <table className="w-full text-left employees-table">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Employé</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Poste</th>
@@ -1360,9 +1366,14 @@ function SitesPage({ search }: { search: string }) {
       <div className="flex items-center justify-between">
         <p className="text-xs text-slate-500">{sitesList.length} site(s)</p>
         <div className="flex items-center gap-2">
-          <button onClick={() => downloadCSV(`sites_${new Date().toISOString().slice(0, 10)}.csv`,
-            ['nom', 'adresse', 'ville', 'telephone', 'responsable', 'capacite', 'effectif', 'cnpsEmployeur', 'numeroContribuable'],
-            sitesList.map(s => [s.name, s.address, s.city, s.phone, s.manager, s.capacity, employees.filter(e => e.siteId === s.id).length, s.cnpsEmployeur || '', s.numeroContribuable || '']))}
+          <button onClick={() => exportCSV(`sites_${new Date().toISOString().slice(0, 10)}.csv`,
+            [{ key: 'nom', label: 'Nom' }, { key: 'adresse', label: 'Adresse' }, { key: 'ville', label: 'Ville' }, { key: 'telephone', label: 'Téléphone' },
+            { key: 'responsable', label: 'Responsable' }, { key: 'capacite', label: 'Capacité' }, { key: 'effectif', label: 'Effectif' },
+            { key: 'cnpsEmployeur', label: 'CNPS employeur' }, { key: 'numeroContribuable', label: 'N° contribuable' }],
+            sitesList.map(s => ({
+              nom: s.name, adresse: s.address, ville: s.city, telephone: s.phone, responsable: s.manager, capacite: s.capacity,
+              effectif: employees.filter(e => e.siteId === s.id).length, cnpsEmployeur: s.cnpsEmployeur || '', numeroContribuable: s.numeroContribuable || '',
+            })))}
             className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50">
             <Ico name="exportFile" size={14} /> Exporter
           </button>
@@ -1464,6 +1475,27 @@ function setAccidentTravailTauxPct(pct: number) {
 }
 
 const JOURS_MOIS_PAIE = 30;
+
+// Registre partagé : chaque page "exportable" (Employés, Paie, Livre de paie fin d'année,
+// Charges sociales...) y enregistre sa configuration d'export courante (colonnes + données),
+// sous sa propre clé de page. La barre d'outils globale (bouton Exporter/Imprimer) lit
+// simplement l'entrée correspondant à la page actuellement affichée.
+type ExportConfigEntry = { title: string; tableClass: string; columns: ExportColumn[]; buildRows: () => ExportRow[] };
+const exportRegistry: Record<string, ExportConfigEntry> = {};
+
+const PAIE_EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'n', label: 'N°' }, { key: 'matricule', label: 'Matricule' }, { key: 'nom', label: 'Nom' },
+  { key: 'prenoms', label: 'Prénoms' }, { key: 'joursPayes', label: 'Jours payés' }, { key: 'heureSup', label: 'H. sup' },
+  { key: 'salaireBase', label: 'Salaire base' }, { key: 'sursalaire', label: 'Sursalaire' }, { key: 'heureSuppl', label: 'Heure suppl.' },
+  { key: 'primeAnciennete', label: 'Prime ancienneté' }, { key: 'primeFonctionNonImp', label: 'Prime fonction non imp.' },
+  { key: 'indemniteRespNonTax', label: 'Indem. resp. non taxable' }, { key: 'primeFonction', label: 'Prime fonction' },
+  { key: 'totalBrut', label: 'Total brut' }, { key: 'brutImposable', label: 'Brut imposable' }, { key: 'brutSocial', label: 'Brut social' },
+  { key: 'dateEmbauche', label: 'Date embauche' }, { key: 'dureeMois', label: 'Durée (mois)' }, { key: 'tauxAnc', label: 'Taux% anc.' },
+  { key: 'situationFam', label: 'Situation fam.' }, { key: 'enfants', label: 'Enfants' }, { key: 'parts', label: 'Parts' },
+  { key: 'impotsBrut', label: 'Impôts brut' }, { key: 'ricf', label: 'RICF' }, { key: 'its', label: 'ITS' }, { key: 'cnps', label: 'CNPS' },
+  { key: 'cnam', label: 'CNAM' }, { key: 'prets', label: 'Prêts' }, { key: 'indemniteTransport', label: 'Indem. transport' },
+  { key: 'salaireNet', label: 'Salaire net' },
+];
 
 // Garde-fou global : un employé créé/importé avec des données de salaire incomplètes ou
 // manquantes (ex. document Firestore partiellement écrit par un ancien formulaire) ne doit
@@ -1866,6 +1898,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   const [periodEnd, setPeriodEnd] = useState(currentMonth.end);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const [otEditor, setOtEditor] = useState<{ emp: Employee; overtime: OvertimeHours } | null>(null);
+  const [showExport, setShowExport] = useState(false);
 
   // Enregistre (ou crée) la saisie manuelle de paie variable d'un employé pour le mois de
   // periodStart, et prévient toute l'application que les données ont changé (bump).
@@ -1885,6 +1918,26 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   const payroll = useMemo(() => {
     return filtered.map(emp => ({ emp, ...computeEmployeePayrollForPeriod(emp, periodStart, periodEnd) }));
   }, [filtered, periodStart, periodEnd, version]);
+
+  const buildPaieExportRows = useCallback((): ExportRow[] => payroll.map((r, i) => {
+    const c = getComponents(r.emp);
+    const { months } = computeAncienneteRate(r.emp.startDate, periodEnd);
+    const primeFonction = c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other;
+    return {
+      n: i + 1, matricule: r.emp.matricule || '', nom: r.emp.lastName, prenoms: r.emp.firstName,
+      joursPayes: r.joursPayes, heureSup: r.heuresSup, salaireBase: r.baseSalaryProrated, sursalaire: r.sursalaireProrated,
+      heureSuppl: r.overtimePay, primeAnciennete: r.ancienneteAmount, primeFonctionNonImp: c.primeFonctionNonImposable,
+      indemniteRespNonTax: r.social.indemniteRespNonTaxable, primeFonction, totalBrut: r.social.totalBrut,
+      brutImposable: r.social.brutImposable, brutSocial: r.social.brutSocial, dateEmbauche: r.emp.startDate, dureeMois: months,
+      tauxAnc: r.ancienneteRatePct, situationFam: r.emp.familySituation || '', enfants: r.emp.numberOfChildren ?? 0,
+      parts: r.social.parts, impotsBrut: r.social.impotsBrut, ricf: r.social.ricf, its: r.social.its, cnps: r.social.cnps,
+      cnam: r.social.cnam, prets: r.social.pret, indemniteTransport: r.social.transportNonImposable, salaireNet: r.netToPay,
+    };
+  }), [payroll, periodEnd]);
+
+  useEffect(() => {
+    exportRegistry['paye'] = { title: 'Livre de paie', tableClass: 'paie-table', columns: PAIE_EXPORT_COLUMNS, buildRows: buildPaieExportRows };
+  }, [buildPaieExportRows]);
 
   // Dès qu'un employé apparaît dans "Paie" pour la période affichée, on enregistre
   // IMMÉDIATEMENT une saisie par défaut (30 j, 0 h sup) s'il n'en a pas encore — pour que ce
@@ -1946,27 +1999,20 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
         <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 ml-2">Jours payés et heures sup. saisis manuellement · cliquez sur une ligne pour ouvrir le bulletin</span>
-        <button onClick={() => {
-          const headers = ['N°', 'Matricule', 'Nom', 'Prénoms', 'Jours payés', 'H. sup', 'Salaire base', 'Sursalaire', 'Heure suppl.',
-            'Prime ancienneté', 'Prime fonction non imp.', 'Indem. resp. non taxable', 'Prime fonction', 'Total brut', 'Brut imposable',
-            'Brut social', 'Date embauche', 'Durée (mois)', 'Taux% anc.', 'Situation fam.', 'Enfants', 'Parts', 'Impôts brut', 'RICF',
-            'ITS', 'CNPS', 'CNAM', 'Prêts', 'Indem. transport', 'Salaire net'];
-          const rows = payroll.map((r, i) => {
-            const c = getComponents(r.emp);
-            const { months } = computeAncienneteRate(r.emp.startDate, periodEnd);
-            const primeFonction = c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other;
-            return [i + 1, r.emp.matricule || '', r.emp.lastName, r.emp.firstName, r.joursPayes, r.heuresSup,
-              r.baseSalaryProrated, r.sursalaireProrated, r.overtimePay, r.ancienneteAmount, c.primeFonctionNonImposable,
-              r.social.indemniteRespNonTaxable, primeFonction, r.social.totalBrut, r.social.brutImposable, r.social.brutSocial,
-              r.emp.startDate, months, r.ancienneteRatePct, r.emp.familySituation || '', r.emp.numberOfChildren ?? 0, r.social.parts,
-              r.social.impotsBrut, r.social.ricf, r.social.its, r.social.cnps, r.social.cnam, r.social.pret,
-              r.social.transportNonImposable, r.netToPay];
-          });
-          downloadCSV(`livre_de_paie_${periodStart}_${periodEnd}.csv`, headers, rows);
-        }} className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50 ml-auto">
+        <button onClick={() => setShowExport(true)} className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50 ml-auto">
           <Ico name="exportFile" size={14} /> Exporter
         </button>
       </div>
+
+      {showExport && (
+        <ExportModal
+          title="Livre de paie"
+          columns={PAIE_EXPORT_COLUMNS}
+          buildRows={buildPaieExportRows}
+          onClose={() => setShowExport(false)}
+          onPrint={(hidden) => applyPrintColumnFilter('paie-table', PAIE_EXPORT_COLUMNS.map(c => c.key), hidden)}
+        />
+      )}
 
       {/* Cartes statistiques globales */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2002,7 +2048,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
+          <table className="w-full text-left paie-table">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
@@ -2491,6 +2537,16 @@ type ChargesPeriodMode = 'month' | 'semester' | 'year';
 // calendaires — chaque mois est calculé séparément à partir des présences réellement
 // saisies (comme dans "Paie"), puis les montants mensuels obtenus sont additionnés.
 // C'est cette somme "mois après mois" qui alimente ensuite les vues semestrielle et annuelle.
+const CHARGES_SOCIALES_EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'nom', label: 'Employé' }, { key: 'poste', label: 'Poste' }, { key: 'moisAvecDonnees', label: 'Mois avec données' },
+  { key: 'brutCumule', label: 'Brut réel cumulé' }, { key: 'retraitePatronale', label: 'CNPS Retraite (7,7%)' },
+  { key: 'prestationsFamiliales', label: 'Prest. familiales (5%)' }, { key: 'accidentsTravail', label: 'Accidents travail' },
+  { key: 'totalFdfp', label: 'FDFP (1,6%)' }, { key: 'total', label: 'Total période' },
+];
+
+// Map mode ⇄ clé de page (les 3 sous-menus "Charges sociales" partagent ce même composant)
+const CHARGES_SOCIALES_PAGE_KEY: Record<ChargesPeriodMode, string> = { month: 'cs-mensuelles', semester: 'cs-semestrielles', year: 'cs-annuelles' };
+
 function cumulateEmployerCharges(emp: Employee, months: { start: string; end: string; label: string }[], atRate: number) {
   let brutCumule = 0;
   let moisAvecDonnees = 0;
@@ -2569,6 +2625,16 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
 
   const yearOptions = [2024, 2025, 2026, 2027];
 
+  const buildRows = useCallback((): ExportRow[] => rows.map(({ emp, brutCumule, moisAvecDonnees, totalMois, charges }) => ({
+    nom: `${emp.firstName} ${emp.lastName}`, poste: emp.position, moisAvecDonnees: `${moisAvecDonnees}/${totalMois}`,
+    brutCumule, retraitePatronale: charges.retraitePatronale, prestationsFamiliales: charges.prestationsFamiliales,
+    accidentsTravail: charges.accidentsTravail, totalFdfp: charges.totalFdfp, total: charges.totalMensuel,
+  })), [rows]);
+  useEffect(() => {
+    const key = CHARGES_SOCIALES_PAGE_KEY[mode];
+    exportRegistry[key] = { title: `Charges sociales — ${periodLabel}`, tableClass: 'charges-sociales-table', columns: CHARGES_SOCIALES_EXPORT_COLUMNS, buildRows };
+  }, [mode, periodLabel, buildRows]);
+
   return (
     <div className="space-y-6">
       {/* Cartes statistiques */}
@@ -2624,6 +2690,12 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
         </select>
 
         <span className="w-px h-6 bg-slate-200 mx-1" />
+        <span className="text-[10px] text-slate-400 uppercase">Période du</span>
+        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[0]?.start)}</span>
+        <span className="text-[10px] text-slate-400 uppercase">au</span>
+        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[months.length - 1]?.end)}</span>
+
+        <span className="w-px h-6 bg-slate-200 mx-1" />
 
         <Ico name="shield" size={18} className="text-orange-500" />
         <span className="text-xs font-bold text-slate-700">Taux Accidents du travail :</span>
@@ -2646,7 +2718,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
+          <table className="w-full text-left charges-sociales-table">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Employé</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Mois avec données</th>
@@ -2781,6 +2853,32 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
   return { ...acc, moisAvecDonnees, totalMois: months.length };
 }
 
+const LIVRE_FIN_ANNEE_EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'n', label: 'N°' }, { key: 'nom', label: 'Nom' }, { key: 'prenoms', label: 'Prénoms' },
+  { key: 'salaireBase', label: 'Salaire base (cumul)' }, { key: 'sursalaire', label: 'Sursalaire (cumul)' },
+  { key: 'heureSuppl', label: 'Heure suppl. (cumul)' }, { key: 'primeAnciennete', label: 'Prime ancienneté (cumul)' },
+  { key: 'primeFonction', label: 'Prime fonction (cumul)' }, { key: 'totalBrut', label: 'Total brut annuel' },
+  { key: 'brutImposable', label: 'Brut imposable' }, { key: 'brutSocial', label: 'Brut social' },
+  { key: 'impotsBrut', label: 'Impôts brut' }, { key: 'ricf', label: 'RICF' }, { key: 'its', label: 'ITS salariés' },
+  { key: 'cnps', label: 'CNPS salariés' }, { key: 'cnam', label: 'CNAM' }, { key: 'pret', label: 'Prêts' },
+  { key: 'transport', label: 'Indem. transport' }, { key: 'salaireNet', label: 'Salaire net annuel' },
+  { key: 'isp', label: 'ISP (1,2%)' }, { key: 'fdfpTA', label: 'FDFP TA (0,4%)' }, { key: 'fdfpTCF', label: 'FDFP TCF (1,2%)' },
+  { key: 'totalImpot', label: 'Total impôt' }, { key: 'prestationFamiliale', label: 'Prest. familiales' },
+  { key: 'accidentTravail', label: 'Accident travail' }, { key: 'retraitePatronale', label: 'Retraite patronale' },
+  { key: 'totalCnpsPatronal', label: 'Total CNPS patronal' }, { key: 'totalGeneral', label: 'TOTAL GÉNÉRAL' },
+];
+
+function buildLivreFinAnneeExportRows(rows: { emp: Employee; baseSalary: number; sursalaire: number; overtimePay: number; ancienneteAmount: number; primeFonction: number; totalBrut: number; brutImposable: number; brutSocial: number; impotsBrut: number; ricf: number; its: number; cnps: number; cnam: number; pret: number; transport: number; netToPay: number; isp: number; fdfpTA: number; fdfpTCF: number; totalImpotPatronal: number; prestationFamiliale: number; accidentTravail: number; cnpsPatronal: number; totalCnpsPatronal: number; totalGeneral: number }[]): ExportRow[] {
+  return rows.map((r, i) => ({
+    n: i + 1, nom: r.emp.lastName, prenoms: r.emp.firstName, salaireBase: r.baseSalary, sursalaire: r.sursalaire,
+    heureSuppl: r.overtimePay, primeAnciennete: r.ancienneteAmount, primeFonction: r.primeFonction, totalBrut: r.totalBrut,
+    brutImposable: r.brutImposable, brutSocial: r.brutSocial, impotsBrut: r.impotsBrut, ricf: r.ricf, its: r.its,
+    cnps: r.cnps, cnam: r.cnam, pret: r.pret, transport: r.transport, salaireNet: r.netToPay, isp: r.isp,
+    fdfpTA: r.fdfpTA, fdfpTCF: r.fdfpTCF, totalImpot: r.totalImpotPatronal, prestationFamiliale: r.prestationFamiliale,
+    accidentTravail: r.accidentTravail, retraitePatronale: r.cnpsPatronal, totalCnpsPatronal: r.totalCnpsPatronal, totalGeneral: r.totalGeneral,
+  }));
+}
+
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
   const { version } = useContext(DataVersionContext);
   const [year, setYear] = useState(new Date().getFullYear());
@@ -2808,6 +2906,11 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
   };
   const coutTotalEmployeur = T.netToPay + T.its + T.cnps + T.cnam + T.totalGeneral; // net + retenues salariales reversées + charges patronales
 
+  const buildRows = useCallback(() => buildLivreFinAnneeExportRows(rows), [rows]);
+  useEffect(() => {
+    exportRegistry['livre-fin-annee'] = { title: "Livre de paie - Fin d'année", tableClass: 'livre-fin-annee-table', columns: LIVRE_FIN_ANNEE_EXPORT_COLUMNS, buildRows };
+  }, [buildRows]);
+
   return (
     <div className="space-y-6">
       {/* Sélecteur d'année */}
@@ -2818,7 +2921,12 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
           {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
-        <span className="text-[10px] text-slate-400 ml-2">Cumul Janvier → Décembre {year} · cliquez sur une ligne pour voir le bulletin de décembre</span>
+        <span className="w-px h-6 bg-slate-200 mx-1" />
+        <span className="text-[10px] text-slate-400 uppercase">Période du</span>
+        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[0].start)}</span>
+        <span className="text-[10px] text-slate-400 uppercase">au</span>
+        <span className="text-xs font-semibold text-slate-700">{formatDateFR(decEnd)}</span>
+        <span className="text-[10px] text-slate-400 ml-2">cliquez sur une ligne pour voir le bulletin de décembre</span>
       </div>
 
       {/* Cartes statistiques globales */}
@@ -2855,7 +2963,7 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
+          <table className="w-full text-left livre-fin-annee-table">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
@@ -3205,18 +3313,22 @@ function AppShell() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importBusy, setImportBusy] = useState(false);
+  const [exportModalPage, setExportModalPage] = useState<string | null>(null);
 
   const onAction = (action: string) => {
     switch (action) {
       case 'save': alert('Toutes les données sont déjà enregistrées automatiquement et en temps réel sur le serveur — aucune action manuelle nécessaire.'); break;
-      case 'print': window.print(); break;
+      case 'print':
+        if (exportRegistry[page]) { setExportModalPage(page); break; }
+        window.print();
+        break;
       case 'import':
         if (page !== 'employees') { alert('L\'import concerne la liste des employés — rendez-vous sur le menu "Employés".'); break; }
         fileInputRef.current?.click();
         break;
       case 'export':
-        if (page !== 'employees') { alert('L\'export concerne pour l\'instant la liste des employés — rendez-vous sur le menu "Employés".'); break; }
-        exportEmployeesCSV(filtered);
+        if (!exportRegistry[page]) { alert('L\'export n\'est pas encore disponible sur cette page.'); break; }
+        setExportModalPage(page);
         break;
     }
   };
@@ -3264,6 +3376,15 @@ function AppShell() {
           <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
             <div className="bg-white rounded-2xl px-6 py-4 shadow-xl text-sm font-semibold text-slate-700">Import en cours…</div>
           </div>
+        )}
+        {exportModalPage && exportRegistry[exportModalPage] && (
+          <ExportModal
+            title={exportRegistry[exportModalPage].title}
+            columns={exportRegistry[exportModalPage].columns}
+            buildRows={exportRegistry[exportModalPage].buildRows}
+            onClose={() => setExportModalPage(null)}
+            onPrint={(hidden) => applyPrintColumnFilter(exportRegistry[exportModalPage!].tableClass, exportRegistry[exportModalPage!].columns.map(c => c.key), hidden)}
+          />
         )}
         <TopBar
           title={titles[page]}

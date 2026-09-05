@@ -373,12 +373,6 @@ const fmt = (d: string) => new Date(d).toLocaleDateString('fr-FR', { day: 'numer
 const initials = (f: string, l: string) => `${f[0]}${l[0]}`.toUpperCase();
 const cn = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(' ');
 const formatFCFA = (n: number | null | undefined) => (n ?? 0).toLocaleString('fr-FR') + ' FCFA';
-// Formate une date ISO (YYYY-MM-DD) en "JJ/MM/AAAA" pour l'affichage "Période du ... au ..."
-const formatDateFR = (iso: string) => {
-  if (!iso) return '—';
-  const [y, m, d] = iso.split('-');
-  return `${d}/${m}/${y}`;
-};
 
 /* ─── Icons (inline SVG) ────────────────────────────────── */
 const Icon = ({ d, size = 20, stroke = 2, className = '' }: { d: string; size?: number; stroke?: number; className?: string }) => (
@@ -1258,10 +1252,10 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[70vh]">
           <table className="w-full text-left employees-table">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Employé</th>
+              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider min-w-[220px]">Employé</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Poste</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Site</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Salaire</th>
@@ -1660,6 +1654,23 @@ function monthRange(year: number, month: number): { start: string; end: string; 
   return { start, end, label };
 }
 
+// Découpe une plage de dates LIBRE (choisie par l'utilisateur) en mois calendaires successifs —
+// permet à "Livre de paie fin d'année" et "Charges sociales" d'accepter n'importe quelle période
+// "du ... au ..." plutôt qu'une année/un mois figé.
+function monthsInRange(startISO: string, endISO: string): { start: string; end: string; label: string }[] {
+  if (!startISO || !endISO || startISO > endISO) return [];
+  const [sy, sm] = startISO.split('-').map(Number);
+  const [ey, em] = endISO.split('-').map(Number);
+  const result: { start: string; end: string; label: string }[] = [];
+  let y = sy, m = sm, guard = 0;
+  while ((y < ey || (y === ey && m <= em)) && guard < 120) { // garde-fou : 10 ans max
+    result.push(monthRange(y, m));
+    m++; if (m > 12) { m = 1; y++; }
+    guard++;
+  }
+  return result;
+}
+
 /* ── FICHE DE PAIE (Bulletin) ── */
 // Ligne du bulletin
 function PaySlipRow({ code, label, base, taux, gain, retenue }: {
@@ -2047,14 +2058,14 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
           </p>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[70vh]">
           <table className="w-full text-left paie-table">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Matricule</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[32px]">N°</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[70px]">Matricule</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Nom</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Prénoms</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : jours réellement payés sur le mois">Jours payés</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : heures supplémentaires du mois">H. sup</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base</th>
@@ -2594,24 +2605,43 @@ const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet
 function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee[]; mode: ChargesPeriodMode; periodLabel: string }) {
   const { version, bump } = useContext(DataVersionContext);
   const now = new Date();
-  // Ancré sur le mois/année courants par défaut, pour rester cohérent avec le menu "Paie".
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [semester, setSemester] = useState<1 | 2>(now.getMonth() + 1 <= 6 ? 1 : 2);
+  const nowYear = now.getFullYear(), nowMonth = now.getMonth() + 1;
+  // Presets pour les boutons rapides Mois/Semestre/Année (n'influencent l'affichage que via periodStart/periodEnd)
+  const [year, setYear] = useState(nowYear);
+  const [month, setMonth] = useState(nowMonth);
+  const [semester, setSemester] = useState<1 | 2>(nowMonth <= 6 ? 1 : 2);
+  // "Période du/au" est la source de vérité, réellement modifiable (comme dans "Paie") — les
+  // presets ci-dessus ne servent qu'à la préremplir rapidement.
+  const initialPreset = mode === 'month' ? monthRange(nowYear, nowMonth)
+    : mode === 'semester' ? { start: monthRange(nowYear, nowMonth <= 6 ? 1 : 7).start, end: monthRange(nowYear, nowMonth <= 6 ? 6 : 12).end }
+    : { start: `${nowYear}-01-01`, end: `${nowYear}-12-31` };
+  const [periodStart, setPeriodStart] = useState(initialPreset.start);
+  const [periodEnd, setPeriodEnd] = useState(initialPreset.end);
+
+  function applyMonthPreset(y: number, m: number) {
+    setYear(y); setMonth(m);
+    const r = monthRange(y, m);
+    setPeriodStart(r.start); setPeriodEnd(r.end);
+  }
+  function applySemesterPreset(y: number, s: 1 | 2) {
+    setYear(y); setSemester(s);
+    setPeriodStart(monthRange(y, s === 1 ? 1 : 7).start);
+    setPeriodEnd(monthRange(y, s === 1 ? 6 : 12).end);
+  }
+  function applyYearPreset(y: number) {
+    setYear(y);
+    if (mode === 'year') { setPeriodStart(`${y}-01-01`); setPeriodEnd(`${y}-12-31`); }
+    else if (mode === 'semester') applySemesterPreset(y, semester);
+    else applyMonthPreset(y, month);
+  }
+
   // Taux Accidents du Travail : réglage GLOBAL persisté (parametres/general), partagé avec le
   // bulletin de paie et le Livre de paie en fin d'année — le modifier ici le modifie partout.
   const atRatePct = parametresGeneraux.accidentTravailTauxPct;
   const atRate = atRatePct / 100;
 
-  // Détermine la liste des mois calendaires réellement agrégés selon le mode choisi
-  const months = useMemo(() => {
-    if (mode === 'month') return [monthRange(year, month)];
-    if (mode === 'semester') {
-      const startM = semester === 1 ? 1 : 7;
-      return Array.from({ length: 6 }, (_, i) => monthRange(year, startM + i));
-    }
-    return Array.from({ length: 12 }, (_, i) => monthRange(year, i + 1)); // année complète
-  }, [mode, year, month, semester]);
+  // Découpe la période (librement modifiable) en mois calendaires réellement agrégés
+  const months = useMemo(() => monthsInRange(periodStart, periodEnd), [periodStart, periodEnd]);
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateEmployerCharges(emp, months, atRate) })),
@@ -2661,13 +2691,13 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
         </div>
       </div>
 
-      {/* Sélecteurs de période + taux AT */}
+      {/* Sélecteurs de période (raccourcis) + plage librement modifiable + taux AT */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-wrap items-center gap-3">
         <Ico name="calendar" size={18} className="text-orange-500" />
         {mode === 'month' && (
           <>
             <span className="text-xs font-bold text-slate-700">Mois :</span>
-            <select value={month} onChange={e => setMonth(Number(e.target.value))}
+            <select value={month} onChange={e => applyMonthPreset(year, Number(e.target.value))}
               className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
               {MOIS_FR.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
             </select>
@@ -2677,23 +2707,24 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
           <>
             <span className="text-xs font-bold text-slate-700">Semestre :</span>
             <div className="flex rounded-xl overflow-hidden border border-slate-200">
-              <button onClick={() => setSemester(1)} className={cn('px-3 py-2 text-xs font-semibold', semester === 1 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S1 (Jan-Juin)</button>
-              <button onClick={() => setSemester(2)} className={cn('px-3 py-2 text-xs font-semibold', semester === 2 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S2 (Juil-Déc)</button>
+              <button onClick={() => applySemesterPreset(year, 1)} className={cn('px-3 py-2 text-xs font-semibold', semester === 1 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S1 (Jan-Juin)</button>
+              <button onClick={() => applySemesterPreset(year, 2)} className={cn('px-3 py-2 text-xs font-semibold', semester === 2 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S2 (Juil-Déc)</button>
             </div>
           </>
         )}
-        {mode !== 'month' && <span className="text-xs font-bold text-slate-700 ml-1">Année :</span>}
-        {mode === 'month' && <span className="text-xs font-bold text-slate-700">Année :</span>}
-        <select value={year} onChange={e => setYear(Number(e.target.value))}
+        <span className="text-xs font-bold text-slate-700 ml-1">Année :</span>
+        <select value={year} onChange={e => applyYearPreset(Number(e.target.value))}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
           {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
 
         <span className="w-px h-6 bg-slate-200 mx-1" />
         <span className="text-[10px] text-slate-400 uppercase">Période du</span>
-        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[0]?.start)}</span>
+        <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 uppercase">au</span>
-        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[months.length - 1]?.end)}</span>
+        <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
 
         <span className="w-px h-6 bg-slate-200 mx-1" />
 
@@ -2717,10 +2748,10 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
           </p>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[70vh]">
           <table className="w-full text-left charges-sociales-table">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Employé</th>
+              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase min-w-[220px]">Employé</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Mois avec données</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Brut réel cumulé</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">CNPS Retraite (7,7%)</th>
@@ -2881,12 +2912,23 @@ function buildLivreFinAnneeExportRows(rows: { emp: Employee; baseSalary: number;
 
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
   const { version } = useContext(DataVersionContext);
-  const [year, setYear] = useState(new Date().getFullYear());
+  const currentYear = new Date().getFullYear();
+  const [year, setYear] = useState(currentYear);
+  // "Période du/au" est la source de vérité (vraiment modifiable) ; le sélecteur d'année n'est
+  // qu'un raccourci qui la préremplit sur Janvier → Décembre de l'année choisie.
+  const [periodStart, setPeriodStart] = useState(`${currentYear}-01-01`);
+  const [periodEnd, setPeriodEnd] = useState(`${currentYear}-12-31`);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const yearOptions = [2024, 2025, 2026, 2027, 2028];
 
-  const months = useMemo(() => Array.from({ length: 12 }, (_, i) => monthRange(year, i + 1)), [year]);
-  const decEnd = months[11].end;
+  function applyYearShortcut(y: number) {
+    setYear(y);
+    setPeriodStart(`${y}-01-01`);
+    setPeriodEnd(`${y}-12-31`);
+  }
+
+  const months = useMemo(() => monthsInRange(periodStart, periodEnd), [periodStart, periodEnd]);
+  const decEnd = months[months.length - 1]?.end || periodEnd;
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateAnnualPayroll(emp, months) })),
@@ -2913,19 +2955,21 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
 
   return (
     <div className="space-y-6">
-      {/* Sélecteur d'année */}
+      {/* Sélecteur d'année (raccourci) + période librement modifiable */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-wrap items-center gap-3">
         <Ico name="receipt" size={18} className="text-orange-500" />
         <span className="text-xs font-bold text-slate-700">Exercice :</span>
-        <select value={year} onChange={e => setYear(Number(e.target.value))}
+        <select value={year} onChange={e => applyYearShortcut(Number(e.target.value))}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
           {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
         <span className="w-px h-6 bg-slate-200 mx-1" />
         <span className="text-[10px] text-slate-400 uppercase">Période du</span>
-        <span className="text-xs font-semibold text-slate-700">{formatDateFR(months[0].start)}</span>
+        <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 uppercase">au</span>
-        <span className="text-xs font-semibold text-slate-700">{formatDateFR(decEnd)}</span>
+        <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 ml-2">cliquez sur une ligne pour voir le bulletin de décembre</span>
       </div>
 
@@ -2962,13 +3006,13 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
           </p>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[70vh]">
           <table className="w-full text-left livre-fin-annee-table">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[32px]">N°</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Nom</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Prénoms</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base (cumul)</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Sursalaire (cumul)</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Heure suppl. (cumul)</th>

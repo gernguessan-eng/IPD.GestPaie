@@ -18,3 +18,66 @@
   --color-orange-900: #194d20;
   --color-orange-950: #123617;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   GEL DES LIGNES / COLONNES ("Figer les volets", comme dans Excel)
+   ══════════════════════════════════════════════════════════════════════
+   S'applique à Employés, Paie, Charges sociales et Livre de paie (fin
+   d'année) — tableaux longs et/ou larges où l'on perd facilement le repère
+   du nom de la ligne ou du titre de la colonne en faisant défiler.
+   Chaque tableau défile désormais dans son propre conteneur borné
+   (.overflow-auto.max-h-[70vh] posé sur le <div> qui l'entoure), ce qui
+   rend le gel fiable sans dépendre du défilement de la page entière. */
+
+/* Ligne d'en-tête toujours visible en haut (défilement vertical) */
+.employees-table thead th,
+.paie-table thead th,
+.charges-sociales-table thead th,
+.livre-fin-annee-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background-color: #f8fafc; /* équivalent slate-50, pour masquer le contenu qui défile dessous */
+}
+.charges-sociales-table thead th { background-color: #f8fafc; }
+
+/* Colonne(s) d'identification toujours visibles à gauche (défilement horizontal).
+   Largeurs alignées sur les min-w-[...] posés sur les <th> correspondants. */
+.employees-table th:nth-child(1), .employees-table td:nth-child(1) {
+  position: sticky; left: 0; z-index: 10; background-color: #fff;
+}
+.charges-sociales-table th:nth-child(1), .charges-sociales-table td:nth-child(1) {
+  position: sticky; left: 0; z-index: 10; background-color: #fff;
+}
+.paie-table th:nth-child(1), .paie-table td:nth-child(1) { position: sticky; left: 0px; z-index: 10; background-color: #fff; }
+.paie-table th:nth-child(2), .paie-table td:nth-child(2) { position: sticky; left: 32px; z-index: 10; background-color: #fff; }
+.paie-table th:nth-child(3), .paie-table td:nth-child(3) { position: sticky; left: 102px; z-index: 10; background-color: #fff; }
+.paie-table th:nth-child(4), .paie-table td:nth-child(4) { position: sticky; left: 202px; z-index: 10; background-color: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.15); }
+
+.livre-fin-annee-table th:nth-child(1), .livre-fin-annee-table td:nth-child(1) { position: sticky; left: 0px; z-index: 10; background-color: #fff; }
+.livre-fin-annee-table th:nth-child(2), .livre-fin-annee-table td:nth-child(2) { position: sticky; left: 32px; z-index: 10; background-color: #fff; }
+.livre-fin-annee-table th:nth-child(3), .livre-fin-annee-table td:nth-child(3) { position: sticky; left: 132px; z-index: 10; background-color: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.15); }
+
+/* Cellules d'intersection (en-tête + colonne gelée) : doivent rester au-dessus des deux */
+.employees-table thead th:nth-child(1),
+.charges-sociales-table thead th:nth-child(1),
+.paie-table thead th:nth-child(-n+4),
+.livre-fin-annee-table thead th:nth-child(-n+3) {
+  z-index: 30;
+  background-color: #f8fafc;
+}
+
+/* Ligne des totaux (pied de tableau) toujours visible en bas */
+.paie-table tfoot tr, .livre-fin-annee-table tfoot tr, .charges-sociales-table tfoot tr {
+  position: sticky;
+  bottom: 0;
+  z-index: 15;
+}
+.paie-table tfoot td, .livre-fin-annee-table tfoot td, .charges-sociales-table tfoot td {
+  background-color: #f8fafc;
+}
+/* Les cellules gelées à gauche DANS le pied doivent rester par-dessus tout, comme dans l'en-tête */
+.paie-table tfoot td:nth-child(-n+4), .livre-fin-annee-table tfoot td:nth-child(-n+3) {
+  z-index: 25;
+}
+

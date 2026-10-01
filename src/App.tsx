@@ -1267,7 +1267,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
               {list.map(emp => {
                 const site = sites.find(s => s.id === emp.siteId);
                 return <tr key={emp.id} className="hover:bg-slate-50/80 cursor-pointer" onClick={() => openEdit(emp)}>
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.firstName} {emp.lastName}</p><p className="text-[10px] text-slate-400">{emp.email}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.lastName} {emp.firstName}</p><p className="text-[10px] text-slate-400">{emp.email}</p></div></div></td>
                   <td className="px-4 py-3 text-xs text-slate-600">{emp.position}<br /><span className="text-[10px] text-slate-400">{emp.department}</span></td>
                   <td className="px-4 py-3 text-xs text-slate-600">{site?.name || '-'}</td>
                   <td className="px-4 py-3 text-xs font-semibold text-slate-700">{formatFCFA(emp.salary)}</td>
@@ -2188,7 +2188,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
       {payslip && <PaySlipModal row={payslip} periodStart={periodStart} periodEnd={periodEnd} onClose={() => setPayslip(null)} />}
 
       {/* Éditeur d'heures supplémentaires (saisie manuelle, 5 taux de majoration) */}
-      <Modal open={!!otEditor} onClose={() => setOtEditor(null)} title={otEditor ? `Heures sup. — ${otEditor.emp.firstName} ${otEditor.emp.lastName}` : ''}>
+      <Modal open={!!otEditor} onClose={() => setOtEditor(null)} title={otEditor ? `Heures sup. — ${otEditor.emp.lastName} ${otEditor.emp.firstName}` : ''}>
         {otEditor && (
           <div className="space-y-3">
             {OVERTIME_RATES.map(r => (
@@ -2375,7 +2375,7 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
           <select value={employeeId} onChange={e => applyEmployeePreset(e.target.value)}
             className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
             <option value="">— Saisie manuelle —</option>
-            {filtered.map(e => <option key={e.id} value={e.id}>{e.firstName} {e.lastName} — {e.position}</option>)}
+            {filtered.map(e => <option key={e.id} value={e.id}>{e.lastName} {e.firstName} — {e.position}</option>)}
           </select>
         </div>
 
@@ -2425,7 +2425,7 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
         <div className="bg-white rounded-2xl border border-orange-200 shadow-sm overflow-hidden">
           <div className="px-5 py-4 bg-orange-50 border-b border-orange-100 flex items-center justify-between">
             <h3 className="text-sm font-bold text-orange-800">Résultat de la reconstitution</h3>
-            {selectedEmp && <span className="text-[11px] text-orange-600">Pour {selectedEmp.firstName} {selectedEmp.lastName}</span>}
+            {selectedEmp && <span className="text-[11px] text-orange-600">Pour {selectedEmp.lastName} {selectedEmp.firstName}</span>}
           </div>
 
           <div className="p-5">
@@ -2656,7 +2656,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
   const yearOptions = [2024, 2025, 2026, 2027];
 
   const buildRows = useCallback((): ExportRow[] => rows.map(({ emp, brutCumule, moisAvecDonnees, totalMois, charges }) => ({
-    nom: `${emp.firstName} ${emp.lastName}`, poste: emp.position, moisAvecDonnees: `${moisAvecDonnees}/${totalMois}`,
+    nom: `${emp.lastName} ${emp.firstName}`, poste: emp.position, moisAvecDonnees: `${moisAvecDonnees}/${totalMois}`,
     brutCumule, retraitePatronale: charges.retraitePatronale, prestationsFamiliales: charges.prestationsFamiliales,
     accidentsTravail: charges.accidentsTravail, totalFdfp: charges.totalFdfp, total: charges.totalMensuel,
   })), [rows]);
@@ -2763,7 +2763,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
             <tbody className="divide-y divide-slate-100">
               {rows.map(({ emp, brutCumule, moisAvecDonnees, totalMois, charges }) => (
                 <tr key={emp.id} className="hover:bg-orange-50/60">
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.firstName} {emp.lastName}</p><p className="text-[10px] text-slate-400">{emp.position} · {emp.professionalStatus}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.lastName} {emp.firstName}</p><p className="text-[10px] text-slate-400">{emp.position} · {emp.professionalStatus}</p></div></div></td>
                   <td className="px-3 py-3 text-right">
                     <span className={cn('inline-block px-2 py-0.5 rounded-full text-[10px] font-bold',
                       moisAvecDonnees === totalMois ? 'bg-emerald-100 text-emerald-700' : moisAvecDonnees === 0 ? 'bg-slate-100 text-slate-400' : 'bg-amber-100 text-amber-700')}>

@@ -391,6 +391,20 @@ function escHtml(v: string | number): string {
   return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Nettoie un segment de nom de fichier : retire les caractères interdits sous Windows/macOS
+// et remplace les espaces par "_", en conservant les accents (noms français).
+function sanitizeFilenamePart(s: string): string {
+  return s.trim().replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_');
+}
+
+// Formate un nombre en français pour les exports Excel/CSV. toLocaleString('fr-FR') insère
+// une espace fine insécable (U+202F) comme séparateur de milliers ; certains lecteurs Excel
+// (notamment l'import HTML→.xls) ne la décodent pas correctement et affichent "?" à la place.
+// On la remplace donc par une espace normale, strictement équivalente visuellement.
+function fmtNumExport(n: number | null | undefined): string {
+  return (n ?? 0).toLocaleString('fr-FR').replace(/[  ]/g, ' ');
+}
+
 /* ─── Icons (inline SVG) ────────────────────────────────── */
 const Icon = ({ d, size = 20, stroke = 2, className = '' }: { d: string; size?: number; stroke?: number; className?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" className={className}><path d={d} /></svg>
@@ -1421,17 +1435,20 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
     ? { code: '655', label: 'INDEMNITÉ DE TRANSPORT (non imposable)', gain: transportNonImposable }
     : null;
 
-  const slipFileBase = `Bulletin_${(emp.matricule || emp.lastName || 'employe').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${periodStart.slice(0, 7)}`;
+  // Nom de fichier directement lisible : Nom_Prénom_du_<période>_au_<période>
+  const slipFileBase = sanitizeFilenamePart(
+    `${emp.lastName || 'Nom'}_${emp.firstName || 'Prenom'}_du_${periodStart}_au_${periodEnd}`
+  );
 
   // Export Excel : fichier .xls (table HTML interprétée nativement par Excel), sans
   // dépendance externe ni build supplémentaire — robuste pour un déploiement Vercel.
   function exportExcel() {
     const line = (l: SlipLine) => `<tr>
       <td>${escHtml(l.code || '')}</td><td>${escHtml(l.label)}</td>
-      <td align="right">${l.base != null ? l.base.toLocaleString('fr-FR') : ''}</td>
+      <td align="right">${l.base != null ? fmtNumExport(l.base) : ''}</td>
       <td align="center">${escHtml(l.taux || '')}</td>
-      <td align="right">${l.gain ? l.gain.toLocaleString('fr-FR') : ''}</td>
-      <td align="right">${l.retenue ? l.retenue.toLocaleString('fr-FR') : ''}</td>
+      <td align="right">${l.gain ? fmtNumExport(l.gain) : ''}</td>
+      <td align="right">${l.retenue ? fmtNumExport(l.retenue) : ''}</td>
     </tr>`;
     const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8" />
@@ -1455,19 +1472,22 @@ td,th{border:1px solid #cbd5e1;padding:3px 6px;} th{background:#e2e8f0;font-weig
 <tr><td colspan="6"></td></tr>
 <tr><th>Code</th><th>Rubrique</th><th>Base</th><th>Taux/Nb</th><th>Gains</th><th>Retenue</th></tr>
 ${gainRows.map(line).join('')}
-<tr class="tot"><td colspan="4">TOTAL BRUT</td><td align="right">${totalBrut.toLocaleString('fr-FR')}</td><td></td></tr>
+<tr class="tot"><td colspan="4">TOTAL BRUT</td><td align="right">${fmtNumExport(totalBrut)}</td><td></td></tr>
 ${retenueRows.map(line).join('')}
-<tr class="tot"><td colspan="4">TOTAL DES RETENUES</td><td></td><td align="right">${totalRetenues.toLocaleString('fr-FR')}</td></tr>
+<tr class="tot"><td colspan="4">TOTAL DES RETENUES</td><td></td><td align="right">${fmtNumExport(totalRetenues)}</td></tr>
 ${transportRow ? line(transportRow) : ''}
 <tr><td colspan="6"></td></tr>
-<tr class="tot"><td colspan="2">NET À PAYER</td><td colspan="4" align="right">${netAPayer.toLocaleString('fr-FR')} FCFA</td></tr>
+<tr class="tot"><td colspan="2">NET À PAYER</td><td colspan="4" align="right">${fmtNumExport(netAPayer)} FCFA</td></tr>
 <tr><td colspan="6"></td></tr>
 <tr><td class="title" colspan="6">Charges patronales (indicatif)</td></tr>
-<tr><td>CNPS retraite patronale (7,7%)</td><td align="right">${cnpsPatronal.toLocaleString('fr-FR')}</td><td>Prestation familiale (5,75%)</td><td align="right">${prestationFamiliale.toLocaleString('fr-FR')}</td><td>Accident du travail (2%)</td><td align="right">${accidentTravail.toLocaleString('fr-FR')}</td></tr>
-<tr><td>IS local (1,2%)</td><td align="right">${isLocal.toLocaleString('fr-FR')}</td><td>Taxe d'apprentissage (0,4%)</td><td align="right">${taxeApprentissage.toLocaleString('fr-FR')}</td><td>Taxe FPC (1,2%)</td><td align="right">${taxeFPC.toLocaleString('fr-FR')}</td></tr>
+<tr><td>CNPS retraite patronale (7,7%)</td><td align="right">${fmtNumExport(cnpsPatronal)}</td><td>Prestation familiale (5,75%)</td><td align="right">${fmtNumExport(prestationFamiliale)}</td><td>Accident du travail (2%)</td><td align="right">${fmtNumExport(accidentTravail)}</td></tr>
+<tr><td>IS local (1,2%)</td><td align="right">${fmtNumExport(isLocal)}</td><td>Taxe d'apprentissage (0,4%)</td><td align="right">${fmtNumExport(taxeApprentissage)}</td><td>Taxe FPC (1,2%)</td><td align="right">${fmtNumExport(taxeFPC)}</td></tr>
 </table>
 </body></html>`;
-    downloadTextFile(`${slipFileBase}.xls`, html, 'application/vnd.ms-excel;charset=utf-8');
+    // BOM UTF-8 en tête : certaines versions d'Excel ignorent le <meta charset> du HTML
+    // pour les fichiers ouverts avec l'extension .xls et retombent sur l'ANSI du poste,
+    // ce qui transforme les caractères non-ASCII (espaces insécables, accents) en "?".
+    downloadTextFile(`${slipFileBase}.xls`, '﻿' + html, 'application/vnd.ms-excel;charset=utf-8');
     setExportOpen(false);
   }
 
@@ -1528,9 +1548,9 @@ ${transportRow ? line(transportRow) : ''}
         <div className="p-6 print:p-0 print-body">
           <div className={cn('border-2 rounded-lg overflow-hidden', isCadre ? 'border-indigo-300' : 'border-slate-300')}>
             {/* Bandeau titre + logo */}
-            <div className={cn('flex items-start justify-between p-4 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
+            <div className={cn('flex items-start justify-between p-4 print:p-2 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
               <div className="flex items-start gap-3">
-                <div className="h-14 w-14 rounded-lg border border-slate-300 bg-white flex items-center justify-center overflow-hidden shrink-0">
+                <div className="h-14 w-14 print:h-10 print:w-10 rounded-lg border border-slate-300 bg-white flex items-center justify-center overflow-hidden shrink-0">
                   <img src={logo} alt="Logo entreprise" className="h-full w-full object-contain" />
                 </div>
                 <div>
@@ -1540,7 +1560,7 @@ ${transportRow ? line(transportRow) : ''}
                   <p className="text-[10px] text-slate-500">CNPS employeur : {site?.cnpsEmployeur || '—'} · N° Contribuable : {site?.numeroContribuable || '—'}</p>
                 </div>
               </div>
-              <div className={cn('text-center px-4 py-2 rounded-lg', isCadre ? 'bg-indigo-100' : 'bg-slate-200')}>
+              <div className={cn('text-center px-4 py-2 print:py-1 rounded-lg', isCadre ? 'bg-indigo-100' : 'bg-slate-200')}>
                 <p className="text-[10px] font-bold text-slate-700 uppercase">Bulletin de paie</p>
                 <p className="text-[10px] text-slate-600">Du {fmt(periodStart)}</p>
                 <p className="text-[10px] text-slate-600">Au {fmt(periodEnd)}</p>
@@ -1549,7 +1569,7 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Infos salarié (fiche complète, comme l'onglet ALI) */}
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1 p-4 border-b border-slate-200 text-[11px]">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 p-4 print:p-2 print:gap-y-0 border-b border-slate-200 text-[11px]">
               <div className="flex justify-between"><span className="text-slate-500">Matricule :</span><span className="font-semibold text-slate-700">{emp.matricule || '—'}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">N° CNPS :</span><span className="font-semibold text-slate-700">{emp.cnpsNumber || '—'}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Nom & Prénom :</span><span className="font-semibold text-slate-700">{emp.lastName} {emp.firstName}</span></div>
@@ -1612,7 +1632,7 @@ ${transportRow ? line(transportRow) : ''}
             </table>
 
             {/* Net à payer */}
-            <div className={cn('flex items-center justify-between p-4 border-t-2', isCadre ? 'border-indigo-300 bg-indigo-50' : 'border-slate-300 bg-slate-100')}>
+            <div className={cn('flex items-center justify-between p-4 print:p-2 border-t-2', isCadre ? 'border-indigo-300 bg-indigo-50' : 'border-slate-300 bg-slate-100')}>
               <div>
                 <p className="text-[10px] text-slate-500 uppercase">Total brut + transport</p>
                 <p className="text-xs font-bold text-slate-700">{(totalBrut + transportNonImposable).toLocaleString('fr-FR')} FCFA</p>
@@ -1628,9 +1648,9 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Charges patronales indicatives — part employeur, non déduite du salarié */}
-            <div className="border-t border-slate-200 p-3 bg-slate-50/60">
-              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Charges patronales (indicatif — part employeur)</p>
-              <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-[10px] text-slate-600">
+            <div className="border-t border-slate-200 p-3 print:p-1.5 bg-slate-50/60">
+              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 print:mb-0.5">Charges patronales (indicatif — part employeur)</p>
+              <div className="grid grid-cols-3 gap-x-4 gap-y-1 print:gap-y-0 text-[10px] text-slate-600">
                 <div className="flex justify-between"><span>CNPS retraite patronale (7,7%)</span><span className="font-semibold">{formatFCFA(cnpsPatronal)}</span></div>
                 <div className="flex justify-between"><span>Prestation familiale (5,75%)</span><span className="font-semibold">{formatFCFA(prestationFamiliale)}</span></div>
                 <div className="flex justify-between"><span>Accident du travail (2%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
@@ -1641,19 +1661,19 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Signatures */}
-            <div className="grid grid-cols-2 gap-6 p-5 border-t border-slate-200">
+            <div className="grid grid-cols-2 gap-6 p-5 print:p-2 border-t border-slate-200">
               <div className="text-center">
-                <div className="h-12"></div>
+                <div className="h-12 print:h-6"></div>
                 <p className="text-[9px] text-slate-400 border-t border-slate-300 pt-1">Signature de l'employé</p>
               </div>
               <div className="text-center">
-                <div className="h-12"></div>
+                <div className="h-12 print:h-6"></div>
                 <p className="text-[9px] text-slate-400 border-t border-slate-300 pt-1">Cachet et signature du directeur</p>
               </div>
             </div>
           </div>
 
-          <p className="text-[9px] text-slate-400 text-center mt-3">
+          <p className="text-[9px] text-slate-400 text-center mt-3 print:mt-1">
             Pour vous aider à faire valoir vos droits, conservez ce bulletin de paie sans limitation de durée. · Net à payer identique au tableau récapitulatif : {formatFCFA(netToPay)}
           </p>
         </div>

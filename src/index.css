@@ -25,7 +25,7 @@
    haut, boutons de la fenêtre modale — est masqué via .no-print). */
 @media print {
   @page {
-    margin: 10mm;
+    margin: 7mm;
   }
   html, body {
     background: #fff !important;
@@ -61,6 +61,13 @@
   }
   .print-area .print-body {
     padding: 0 !important;
+  }
+  /* Resserre les lignes du tableau du bulletin à l'impression, pour que le bulletin
+     tienne sur une seule page (y compris en paysage) même avec de nombreuses rubriques. */
+  .print-area table th,
+  .print-area table td {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
   }
   /* Neutralise le positionnement/centrage/padding de l'enveloppe de la fenêtre modale,
      pour que .print-area (position: absolute) se positionne par rapport à la page et non

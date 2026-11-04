@@ -1,8 +1,6 @@
-import { useState, useMemo, useEffect, useRef, useCallback, useContext, createContext, Component } from 'react';
+import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
-import { startRiseSession, endRiseSession } from './lib/risePresenceSync';
-import { ExportModal, applyPrintColumnFilter, exportCSV, type ExportColumn, type ExportRow } from './lib/exportTools';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -374,6 +372,25 @@ const initials = (f: string, l: string) => `${f[0]}${l[0]}`.toUpperCase();
 const cn = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(' ');
 const formatFCFA = (n: number | null | undefined) => (n ?? 0).toLocaleString('fr-FR') + ' FCFA';
 
+// Déclenche le téléchargement d'un fichier texte généré côté client (CSV, HTML/Excel…)
+// sans dépendance externe : Blob + lien <a> temporaire.
+function downloadTextFile(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Échappe une valeur pour une cellule HTML (export Excel via table HTML).
+function escHtml(v: string | number): string {
+  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /* ─── Icons (inline SVG) ────────────────────────────────── */
 const Icon = ({ d, size = 20, stroke = 2, className = '' }: { d: string; size?: number; stroke?: number; className?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" className={className}><path d={d} /></svg>
@@ -451,7 +468,6 @@ function Sidebar({
         { key: 'cs-annuelles', label: 'C.S annuelles' },
       ]
     },
-    { key: 'reconstitution', label: 'Reconstitution', icon: 'search' },
   ];
 
   const [expandedMenu, setExpandedMenu] = useState<string | null>(null);
@@ -677,206 +693,10 @@ function formatMoney(n: number | null | undefined): string {
 /* PAGE: DASHBOARD                                        */
 /* ══════════════════════════════════════════════════════ */
 
-// Supprime les restes de données de démo dans Firestore, sans toucher aux données réelles :
-// - "leaves" et "presences" : collections entièrement héritées de l'ancienne version (plus
-//   utilisées par le code actuel) → supprimées en totalité.
-// - "payrollOverrides" : seules les entrées dont l'employeeId ne correspond à AUCUN employé
-//   actuellement dans la collection "employees" sont supprimées (= anciennes données de démo).
-//   Les saisies réelles de vos employés actuels restent intactes.
-async function cleanupDemoData(): Promise<{ deletedLeaves: number; deletedPresences: number; deletedOrphanOverrides: number }> {
-  const [leavesSnap, presencesSnap, overridesSnap, employeesSnap] = await Promise.all([
-    getDocs(collection(db, 'leaves')),
-    getDocs(collection(db, 'presences')),
-    getDocs(collection(db, 'payrollOverrides')),
-    getDocs(collection(db, 'employees')),
-  ]);
-  const validEmployeeIds = new Set(employeesSnap.docs.map(d => d.id));
-
-  const deletions: Promise<void>[] = [];
-  leavesSnap.docs.forEach(d => deletions.push(deleteDoc(d.ref)));
-  presencesSnap.docs.forEach(d => deletions.push(deleteDoc(d.ref)));
-
-  let deletedOrphanOverrides = 0;
-  overridesSnap.docs.forEach(d => {
-    const data = d.data() as { employeeId?: string };
-    if (data.employeeId && !validEmployeeIds.has(data.employeeId)) {
-      deletions.push(deleteDoc(d.ref));
-      deletedOrphanOverrides++;
-    }
-  });
-
-  await Promise.all(deletions);
-  return { deletedLeaves: leavesSnap.size, deletedPresences: presencesSnap.size, deletedOrphanOverrides };
-}
-
-// ── Export des employés (CSV/Excel/PDF via le registre partagé) ──
-const EMPLOYEE_EXPORT_COLUMNS: ExportColumn[] = [
-  { key: 'matricule', label: 'Matricule' }, { key: 'prenom', label: 'Prénom' }, { key: 'nom', label: 'Nom' },
-  { key: 'poste', label: 'Poste' }, { key: 'departement', label: 'Département' }, { key: 'site', label: 'Site' },
-  { key: 'contrat', label: 'Contrat' }, { key: 'statut', label: 'Statut' }, { key: 'dateEmbauche', label: "Date d'embauche" },
-  { key: 'salaireBase', label: 'Salaire base' }, { key: 'sursalaire', label: 'Sursalaire' }, { key: 'logement', label: 'Logement' },
-  { key: 'transport', label: 'Transport' }, { key: 'primeFonctionImposable', label: 'Indem. représentation' },
-  { key: 'primeResponsabilite', label: 'Prime responsabilité' }, { key: 'primeRendement', label: 'Prime rendement' },
-  { key: 'primeExceptionnelle', label: 'Prime exceptionnelle' }, { key: 'autrePrime1Nom', label: 'Autre prime 1 — nom' },
-  { key: 'autrePrime1Montant', label: 'Autre prime 1 — montant' }, { key: 'autrePrime2Nom', label: 'Autre prime 2 — nom' },
-  { key: 'autrePrime2Montant', label: 'Autre prime 2 — montant' }, { key: 'primeFonctionNonImposable', label: 'Prime fonction non imp.' },
-  { key: 'indemniteResponsabiliteNonTaxable', label: 'Indem. resp. non taxable' }, { key: 'situationFamiliale', label: 'Situation familiale' },
-  { key: 'nombreEnfants', label: "Nombre d'enfants" }, { key: 'cnam', label: 'CNAM' }, { key: 'pret', label: 'Prêt' },
-  { key: 'acompte', label: 'Acompte' }, { key: 'assurance', label: 'Assurance' }, { key: 'cnpsNumero', label: 'N° CNPS' },
-  { key: 'categorie', label: 'Catégorie' }, { key: 'statutProfessionnel', label: 'Statut professionnel' }, { key: 'email', label: 'Email' },
-  { key: 'telephone', label: 'Téléphone' }, { key: 'dateNaissance', label: 'Date de naissance' }, { key: 'nationalite', label: 'Nationalité' },
-  { key: 'sexe', label: 'Sexe' }, { key: 'chefDeFamille', label: 'Chef de famille' }, { key: 'congesAnnuelsJours', label: 'Congés annuels (j)' },
-];
-
-function buildEmployeesExportRows(list: Employee[]): ExportRow[] {
-  return list.map(e => {
-    const c = getComponents(e);
-    const siteName = sites.find(s => s.id === e.siteId)?.name || '';
-    return {
-      matricule: e.matricule || '', prenom: e.firstName, nom: e.lastName, poste: e.position, departement: e.department,
-      site: siteName, contrat: e.contractType, statut: e.status, dateEmbauche: e.startDate,
-      salaireBase: c.baseSalary, sursalaire: c.sursalaire, logement: c.housing, transport: c.transport,
-      primeFonctionImposable: c.representation, primeResponsabilite: c.responsibility, primeRendement: c.performance,
-      primeExceptionnelle: c.boisson, autrePrime1Nom: c.otherLabel1 || '', autrePrime1Montant: c.otherAmount1,
-      autrePrime2Nom: c.otherLabel2 || '', autrePrime2Montant: c.otherAmount2,
-      primeFonctionNonImposable: c.primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: c.indemniteResponsabiliteNonTaxable,
-      situationFamiliale: e.familySituation || '', nombreEnfants: e.numberOfChildren ?? 0, cnam: e.cnamAmount ?? 0,
-      pret: e.pret ?? 0, acompte: e.acompte ?? 0, assurance: e.assurance ?? 0, cnpsNumero: e.cnpsNumber || '',
-      categorie: e.category || '', statutProfessionnel: e.professionalStatus, email: e.email || '', telephone: e.phone || '',
-      dateNaissance: e.birthDate || '', nationalite: e.nationality || '', sexe: e.gender || '',
-      chefDeFamille: e.chefDeFamille ? 'Oui' : 'Non', congesAnnuelsJours: e.congesAnnuelsJours ?? '',
-    };
-  });
-}
-
-// Parseur CSV minimal (séparateur ";", champs entre guillemets) — suffisant pour des fichiers
-// employés/Excel classiques, sans dépendance externe.
-function parseCSVText(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-      } else field += ch;
-    } else if (ch === '"') inQuotes = true;
-    else if (ch === ';') { row.push(field); field = ''; }
-    else if (ch === '\r') { /* ignoré */ }
-    else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-    else field += ch;
-  }
-  if (field.length || row.length) { row.push(field); rows.push(row); }
-  return rows.filter(r => r.some(v => v.trim() !== ''));
-}
-
-// Importe un fichier CSV (même format que l'export). Met à jour un employé existant si son
-// "matricule" correspond à un employé déjà présent, sinon en crée un nouveau.
-async function importEmployeesCSV(file: File): Promise<{ created: number; updated: number; errors: string[] }> {
-  const raw = await file.text();
-  const rows = parseCSVText(raw.replace(/^\uFEFF/, ''));
-  if (!rows.length) return { created: 0, updated: 0, errors: ['Fichier vide.'] };
-  const header = rows[0].map(h => h.trim());
-  const col = (name: string) => header.indexOf(name);
-  let created = 0, updated = 0;
-  const errors: string[] = [];
-
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    const get = (name: string) => { const j = col(name); return j >= 0 ? (r[j] ?? '').trim() : ''; };
-    const num = (name: string) => { const n = Number(get(name).replace(/\s/g, '').replace(',', '.')); return isNaN(n) ? 0 : n; };
-
-    const firstName = get('prenom'), lastName = get('nom');
-    if (!firstName && !lastName) { errors.push(`Ligne ${i + 1} : prénom et nom manquants — ignorée.`); continue; }
-
-    const matricule = get('matricule');
-    const site = sites.find(s => s.name === get('site'));
-    const otherAmount1 = num('autrePrime1Montant');
-    const otherAmount2 = num('autrePrime2Montant');
-    const components: SalaryComponents = {
-      baseSalary: num('salaireBase'), sursalaire: num('sursalaire'), seniority: 0, housing: num('logement'),
-      transport: num('transport'), representation: num('primeFonctionImposable'), responsibility: num('primeResponsabilite'),
-      performance: num('primeRendement'), boisson: num('primeExceptionnelle'),
-      other: otherAmount1 + otherAmount2, otherAmount1, otherAmount2,
-      otherLabel1: get('autrePrime1Nom') || undefined, otherLabel2: get('autrePrime2Nom') || undefined,
-      primeFonctionNonImposable: num('primeFonctionNonImposable'), indemniteResponsabiliteNonTaxable: num('indemniteResponsabiliteNonTaxable'),
-    };
-
-    const existing = matricule ? employees.find(e => e.matricule === matricule) : undefined;
-    if (existing) {
-      Object.assign(existing, {
-        firstName, lastName,
-        position: get('poste') || existing.position, department: get('departement') || existing.department,
-        siteId: site?.id || existing.siteId,
-        contractType: (get('contrat') || existing.contractType) as Employee['contractType'],
-        status: (get('statut') || existing.status) as Employee['status'],
-        startDate: get('dateEmbauche') || existing.startDate,
-        familySituation: (get('situationFamiliale') || existing.familySituation) as FamilySituation,
-        numberOfChildren: get('nombreEnfants') !== '' ? num('nombreEnfants') : existing.numberOfChildren,
-        cnamAmount: num('cnam'), pret: num('pret'), acompte: num('acompte'), assurance: num('assurance'),
-        cnpsNumber: get('cnpsNumero') || existing.cnpsNumber, category: get('categorie') || existing.category,
-        professionalStatus: (get('statutProfessionnel') || existing.professionalStatus) as Employee['professionalStatus'],
-        email: get('email') || existing.email, phone: get('telephone') || existing.phone,
-        birthDate: get('dateNaissance') || existing.birthDate, nationality: get('nationalite') || existing.nationality,
-        gender: (get('sexe') || existing.gender) as Employee['gender'],
-        chefDeFamille: get('chefDeFamille') ? get('chefDeFamille').toLowerCase() === 'oui' : existing.chefDeFamille,
-        congesAnnuelsJours: get('congesAnnuelsJours') !== '' ? num('congesAnnuelsJours') : existing.congesAnnuelsJours,
-        components, salary: computeSalary(components),
-      });
-      persistDoc('employees', existing.id, existing);
-      updated++;
-    } else {
-      const newEmp: Employee = {
-        id: `e${Date.now()}_${i}`, firstName, lastName, email: get('email'), phone: get('telephone'),
-        position: get('poste'), department: get('departement'), siteId: site?.id || (sites[0]?.id || ''),
-        contractType: (get('contrat') || 'CDI') as Employee['contractType'],
-        startDate: get('dateEmbauche') || new Date().toISOString().slice(0, 10),
-        salary: computeSalary(components), components,
-        status: (get('statut') || 'Actif') as Employee['status'],
-        professionalStatus: (get('statutProfessionnel') || 'Ouvrier') as Employee['professionalStatus'],
-        category: get('categorie'), matricule: matricule || undefined, cnpsNumber: get('cnpsNumero') || undefined,
-        familySituation: (get('situationFamiliale') || 'Célibataire') as FamilySituation,
-        avatarColor: '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
-        birthDate: get('dateNaissance') || undefined, nationality: get('nationalite') || undefined,
-        gender: (get('sexe') as Employee['gender']) || undefined,
-        chefDeFamille: get('chefDeFamille').toLowerCase() === 'oui',
-        numberOfChildren: num('nombreEnfants'), congesAnnuelsJours: get('congesAnnuelsJours') !== '' ? num('congesAnnuelsJours') : undefined,
-        cnamAmount: num('cnam'), pret: num('pret'), acompte: num('acompte'), assurance: num('assurance'),
-      };
-      employees.push(newEmp);
-      persistDoc('employees', newEmp.id, newEmp);
-      created++;
-    }
-  }
-  return { created, updated, errors };
-}
-
 function DashboardPage({ filtered }: { filtered: Employee[] }) {
   const acts = filtered.filter((e) => e.status === 'Actif').length;
   const inLeave = employees.filter((e) => e.status === 'En congé').length;
   const totalSalary = filtered.reduce((acc, e) => acc + e.salary, 0);
-
-  const [showMaintenance, setShowMaintenance] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanupResult, setCleanupResult] = useState<{ deletedLeaves: number; deletedPresences: number; deletedOrphanOverrides: number } | null>(null);
-  const [cleanupError, setCleanupError] = useState('');
-
-  async function runCleanup() {
-    if (!window.confirm("Supprimer définitivement les anciennes données de démo (collections \"leaves\"/\"presences\" et entrées de paie orphelines) ? Les données de vos employés actuels ne seront pas touchées.")) return;
-    setCleaning(true);
-    setCleanupError('');
-    setCleanupResult(null);
-    try {
-      const result = await cleanupDemoData();
-      setCleanupResult(result);
-    } catch (err) {
-      setCleanupError(err instanceof Error ? err.message : 'Erreur inconnue');
-    } finally {
-      setCleaning(false);
-    }
-  }
 
   return (
     <div className="space-y-6">
@@ -890,21 +710,20 @@ function DashboardPage({ filtered }: { filtered: Employee[] }) {
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
         <h3 className="text-sm font-bold text-slate-800 mb-4">Employés par département</h3>
         <div className="space-y-3">
-          {Array.from(new Set(filtered.map(e => e.department).filter((d): d is string => !!d))).sort().map((dept, i) => {
+          {['Mécanique', 'Administration', 'Finance', 'Carrosserie', 'Magasin', 'Direction'].map((dept) => {
             const count = filtered.filter((e) => e.department === dept).length;
             const pct = filtered.length ? Math.round((count / filtered.length) * 100) : 0;
-            const palette = ['#6366f1', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#e11d48', '#0ea5e9', '#84cc16', '#f97316', '#14b8a6'];
+            const colors: Record<string, string> = { Mécanique: '#6366f1', Administration: '#f59e0b', Finance: '#10b981', Carrosserie: '#8b5cf6', Magasin: '#ec4899', Direction: '#e11d48' };
             return (<div key={dept}>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-slate-600">{dept}</span>
                 <span className="text-[11px] font-semibold text-slate-700">{count} <span className="text-slate-400">({pct}%)</span></span>
               </div>
               <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: palette[i % palette.length] }} />
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: colors[dept] || '#94a3b8' }} />
               </div>
             </div>);
           })}
-          {filtered.every(e => !e.department) && <p className="text-xs text-slate-400">Aucun département renseigné pour l'instant.</p>}
         </div>
       </div>
 
@@ -931,39 +750,6 @@ function DashboardPage({ filtered }: { filtered: Employee[] }) {
           })}
         </div>
       </div>
-
-      {/* Outil de maintenance — nettoyage des restes de données de démo, repliable et discret */}
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-        <button onClick={() => setShowMaintenance(v => !v)} className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-700">
-          <Ico name="chevronDown" size={14} className={cn('transition-transform', showMaintenance ? 'rotate-180' : '')} />
-          Outils de maintenance
-        </button>
-        {showMaintenance && (
-          <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
-            <div>
-              <p className="text-xs font-semibold text-slate-700">Nettoyer les anciennes données de démo</p>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Supprime les collections "leaves"/"presences" (héritées de l'ancienne version, non utilisées) ainsi que les entrées
-                de paie ("payrollOverrides") qui ne correspondent à aucun employé actuel. Vos employés et leurs saisies réelles
-                (jours travaillés, heures sup...) ne sont jamais touchés.
-              </p>
-            </div>
-            <button onClick={runCleanup} disabled={cleaning}
-              className="px-4 py-2 text-xs font-bold bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-xl transition-colors disabled:opacity-50">
-              {cleaning ? 'Nettoyage en cours…' : 'Nettoyer les données de démo'}
-            </button>
-            {cleanupResult && (
-              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
-                Terminé : {cleanupResult.deletedLeaves} document(s) "leaves", {cleanupResult.deletedPresences} document(s) "presences"
-                et {cleanupResult.deletedOrphanOverrides} entrée(s) de paie orpheline(s) supprimés.
-              </p>
-            )}
-            {cleanupError && (
-              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">Erreur : {cleanupError}</p>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -989,7 +775,7 @@ function StatCard({ label, value, sub, icon, color }: { label: string; value: st
 /* PAGE: EMPLOYÉS                                         */
 /* ══════════════════════════════════════════════════════ */
 
-const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, otherAmount1: 0, otherAmount2: 0, primeFonctionNonImposable: 0, indemniteResponsabiliteNonTaxable: 0 });
+const emptyComponents = (): SalaryComponents => ({ baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0, responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0 });
 
 // Champ de rubrique de paie
 function SalaryLine({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
@@ -997,22 +783,6 @@ function SalaryLine({ label, value, onChange }: { label: string; value: number; 
     <div className="flex items-center gap-2">
       <label className="text-[11px] text-slate-600 flex-1">{label}</label>
       <input type="number" min={0} step={5000} value={value || 0} onChange={(e) => onChange(Number(e.target.value))}
-        className="w-32 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-      <span className="text-[9px] text-slate-400 w-8">FCFA</span>
-    </div>
-  );
-}
-
-// Ligne "Autre prime" à nom personnalisable : l'utilisateur saisit lui-même l'intitulé de la
-// prime (ex : "Prime de salissure") en plus du montant — contrairement aux autres rubriques,
-// dont le libellé est fixe.
-function CustomPrimeLine({ index, name, value, onNameChange, onValueChange }: { index: number; name: string; value: number; onNameChange: (v: string) => void; onValueChange: (v: number) => void }) {
-  return (
-    <div className="flex items-center gap-2">
-      <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)}
-        placeholder={`Autres primes ${index} — nom de la prime`}
-        className="text-[11px] text-slate-600 flex-1 px-2 py-1.5 border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-orange-300 placeholder:text-slate-300" />
-      <input type="number" min={0} step={5000} value={value || 0} onChange={(e) => onValueChange(Number(e.target.value))}
         className="w-32 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
       <span className="text-[9px] text-slate-400 w-8">FCFA</span>
     </div>
@@ -1046,12 +816,7 @@ function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryCompo
         <SalaryLine label="Indemnité de représentation" value={comp.representation} onChange={(v) => set('representation', v)} />
         <SalaryLine label="Prime de responsabilité" value={comp.responsibility} onChange={(v) => set('responsibility', v)} />
         <SalaryLine label="Prime de rendement" value={comp.performance} onChange={(v) => set('performance', v)} />
-        <CustomPrimeLine index={1} name={comp.otherLabel1 || ''} value={comp.otherAmount1}
-          onNameChange={(v) => onChange({ ...comp, otherLabel1: v })}
-          onValueChange={(v) => onChange({ ...comp, otherAmount1: v, other: v + (comp.otherAmount2 || 0) })} />
-        <CustomPrimeLine index={2} name={comp.otherLabel2 || ''} value={comp.otherAmount2}
-          onNameChange={(v) => onChange({ ...comp, otherLabel2: v })}
-          onValueChange={(v) => onChange({ ...comp, otherAmount2: v, other: (comp.otherAmount1 || 0) + v })} />
+        <SalaryLine label="Autres primes" value={comp.other} onChange={(v) => set('other', v)} />
       </div>
       <div className="flex items-center justify-between px-1 pt-1">
         <span className="text-xs font-bold text-slate-700">SALAIRE BRUT TOTAL</span>
@@ -1176,11 +941,6 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
   if (filterDept) list = list.filter((e) => e.department === filterDept);
   const depts = Array.from(new Set(employees.map((e) => e.department)));
 
-  const buildRows = useCallback(() => buildEmployeesExportRows(list), [list]);
-  useEffect(() => {
-    exportRegistry['employees'] = { title: 'Employés', tableClass: 'employees-table', columns: EMPLOYEE_EXPORT_COLUMNS, buildRows };
-  }, [buildRows]);
-
   function openAdd() {
     setForm({
       firstName: '', lastName: '', email: '', phone: '', position: '', department: '', siteId: '', contractType: 'CDI',
@@ -1214,7 +974,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
 
   function openEdit(emp: Employee) {
     setForm({ ...emp });
-    setComp(getComponents(emp));
+    setComp({ ...emp.components });
     setEditModal(emp);
   }
   function doEdit() {
@@ -1252,10 +1012,10 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-auto max-h-[70vh]">
-          <table className="w-full text-left employees-table">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider min-w-[220px]">Employé</th>
+              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Employé</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Poste</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Site</th>
               <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Salaire</th>
@@ -1267,7 +1027,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
               {list.map(emp => {
                 const site = sites.find(s => s.id === emp.siteId);
                 return <tr key={emp.id} className="hover:bg-slate-50/80 cursor-pointer" onClick={() => openEdit(emp)}>
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.lastName} {emp.firstName}</p><p className="text-[10px] text-slate-400">{emp.email}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.firstName} {emp.lastName}</p><p className="text-[10px] text-slate-400">{emp.email}</p></div></div></td>
                   <td className="px-4 py-3 text-xs text-slate-600">{emp.position}<br /><span className="text-[10px] text-slate-400">{emp.department}</span></td>
                   <td className="px-4 py-3 text-xs text-slate-600">{site?.name || '-'}</td>
                   <td className="px-4 py-3 text-xs font-semibold text-slate-700">{formatFCFA(emp.salary)}</td>
@@ -1359,22 +1119,9 @@ function SitesPage({ search }: { search: string }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-xs text-slate-500">{sitesList.length} site(s)</p>
-        <div className="flex items-center gap-2">
-          <button onClick={() => exportCSV(`sites_${new Date().toISOString().slice(0, 10)}.csv`,
-            [{ key: 'nom', label: 'Nom' }, { key: 'adresse', label: 'Adresse' }, { key: 'ville', label: 'Ville' }, { key: 'telephone', label: 'Téléphone' },
-            { key: 'responsable', label: 'Responsable' }, { key: 'capacite', label: 'Capacité' }, { key: 'effectif', label: 'Effectif' },
-            { key: 'cnpsEmployeur', label: 'CNPS employeur' }, { key: 'numeroContribuable', label: 'N° contribuable' }],
-            sitesList.map(s => ({
-              nom: s.name, adresse: s.address, ville: s.city, telephone: s.phone, responsable: s.manager, capacite: s.capacity,
-              effectif: employees.filter(e => e.siteId === s.id).length, cnpsEmployeur: s.cnpsEmployeur || '', numeroContribuable: s.numeroContribuable || '',
-            })))}
-            className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50">
-            <Ico name="exportFile" size={14} /> Exporter
-          </button>
-          <button onClick={()=>{setMForm({capacity:10});setAddModal(true)}} className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-semibold rounded-xl shadow-sm shadow-orange-200">
-            <Ico name="plus" size={15} /> Ajouter un site
-          </button>
-        </div>
+        <button onClick={()=>{setMForm({capacity:10});setAddModal(true)}} className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-xs font-semibold rounded-xl shadow-sm shadow-orange-200">
+          <Ico name="plus" size={15} /> Ajouter un site
+        </button>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
         {sitesList.map(s=>{
@@ -1445,75 +1192,18 @@ const JOURS_OUVRES_MOIS = 22;
 // 30 jours calendaires, comme l'indique l'onglet "ALI" du classeur Excel (colonne NOMBRE = 30,
 // gain = base × nombre/30). C'est cette base de 30 jours qui sert à proratiser la paie en
 // fonction des jours réellement travaillés saisis dans "Présences".
-// ── Réglages généraux persistés (Firestore : parametres/general) ──
-// Objet mutable au niveau module (même schéma que les collections employees/leaves...) :
-// modifié en place puis explicitement persisté via setAccidentTravailTauxPct, pour que la
-// même valeur s'applique partout (bulletin, Livre de paie fin d'année, Charges sociales).
-const parametresGeneraux = { accidentTravailTauxPct: (CHARGES_PATRONALES.accidentTravailTaux * 100) };
-
-async function loadParametresGeneraux() {
-  try {
-    const snap = await getDoc(doc(db, 'parametres', 'general'));
-    if (snap.exists()) {
-      const data = snap.data() as Partial<typeof parametresGeneraux>;
-      if (typeof data.accidentTravailTauxPct === 'number') parametresGeneraux.accidentTravailTauxPct = data.accidentTravailTauxPct;
-    }
-  } catch (err) {
-    console.error('Erreur de chargement Firestore (parametres/general) :', err);
-  }
-}
-
-function setAccidentTravailTauxPct(pct: number) {
-  parametresGeneraux.accidentTravailTauxPct = Math.max(0, pct);
-  persistDoc('parametres', 'general', parametresGeneraux);
-}
-
 const JOURS_MOIS_PAIE = 30;
-
-// Registre partagé : chaque page "exportable" (Employés, Paie, Livre de paie fin d'année,
-// Charges sociales...) y enregistre sa configuration d'export courante (colonnes + données),
-// sous sa propre clé de page. La barre d'outils globale (bouton Exporter/Imprimer) lit
-// simplement l'entrée correspondant à la page actuellement affichée.
-type ExportConfigEntry = { title: string; tableClass: string; columns: ExportColumn[]; buildRows: () => ExportRow[] };
-const exportRegistry: Record<string, ExportConfigEntry> = {};
-
-const PAIE_EXPORT_COLUMNS: ExportColumn[] = [
-  { key: 'n', label: 'N°' }, { key: 'matricule', label: 'Matricule' }, { key: 'nom', label: 'Nom' },
-  { key: 'prenoms', label: 'Prénoms' }, { key: 'joursPayes', label: 'Jours payés' }, { key: 'heureSup', label: 'H. sup' },
-  { key: 'salaireBase', label: 'Salaire base' }, { key: 'sursalaire', label: 'Sursalaire' }, { key: 'heureSuppl', label: 'Heure suppl.' },
-  { key: 'primeAnciennete', label: 'Prime ancienneté' }, { key: 'primeFonctionNonImp', label: 'Prime fonction non imp.' },
-  { key: 'indemniteRespNonTax', label: 'Indem. resp. non taxable' }, { key: 'primeFonction', label: 'Prime fonction' },
-  { key: 'totalBrut', label: 'Total brut' }, { key: 'brutImposable', label: 'Brut imposable' }, { key: 'brutSocial', label: 'Brut social' },
-  { key: 'dateEmbauche', label: 'Date embauche' }, { key: 'dureeMois', label: 'Durée (mois)' }, { key: 'tauxAnc', label: 'Taux% anc.' },
-  { key: 'situationFam', label: 'Situation fam.' }, { key: 'enfants', label: 'Enfants' }, { key: 'parts', label: 'Parts' },
-  { key: 'impotsBrut', label: 'Impôts brut' }, { key: 'ricf', label: 'RICF' }, { key: 'its', label: 'ITS' }, { key: 'cnps', label: 'CNPS' },
-  { key: 'cnam', label: 'CNAM' }, { key: 'prets', label: 'Prêts' }, { key: 'indemniteTransport', label: 'Indem. transport' },
-  { key: 'salaireNet', label: 'Salaire net' },
-];
 
 // Garde-fou global : un employé créé/importé avec des données de salaire incomplètes ou
 // manquantes (ex. document Firestore partiellement écrit par un ancien formulaire) ne doit
 // JAMAIS faire planter une page entière — on retombe sur des rubriques à 0 plutôt que de
 // lever une exception. Utilisé partout où "emp.components" est lu dans les calculs de paie.
 function getComponents(emp: Employee): SalaryComponents {
-  const c = emp.components;
   return {
-    baseSalary: c?.baseSalary ?? 0,
-    sursalaire: c?.sursalaire ?? 0,
-    seniority: c?.seniority ?? 0,
-    housing: c?.housing ?? 0,
-    transport: c?.transport ?? 0,
-    representation: c?.representation ?? 0,
-    responsibility: c?.responsibility ?? 0,
-    performance: c?.performance ?? 0,
-    boisson: c?.boisson ?? 0,
-    other: c?.other ?? 0,
-    otherAmount1: c?.otherAmount1 ?? 0,
-    otherAmount2: c?.otherAmount2 ?? 0,
-    otherLabel1: c?.otherLabel1,
-    otherLabel2: c?.otherLabel2,
-    primeFonctionNonImposable: c?.primeFonctionNonImposable ?? 0,
-    indemniteResponsabiliteNonTaxable: c?.indemniteResponsabiliteNonTaxable ?? 0,
+    baseSalary: 0, sursalaire: 0, seniority: 0, housing: 0, transport: 0, representation: 0,
+    responsibility: 0, performance: 0, boisson: 0, other: 0, primeFonctionNonImposable: 0,
+    indemniteResponsabiliteNonTaxable: 0,
+    ...(emp.components || {}),
   };
 }
 
@@ -1526,7 +1216,7 @@ type SocialDeductions = {
   indemniteRespNonTaxable: number; // Indemnité de responsabilité non taxable — exclue de l'IGR, INCLUSE dans la CNPS
   totalBrut: number;             // (K) = brutImposable + brutNonImposable + indemniteRespNonTaxable
   brut: number;                  // alias de totalBrut — conservé pour compat avec "Charges sociales"
-  brutSocial: number;            // (M) base de calcul CNPS/CMU = totalBrut (brut social = brut total)
+  brutSocial: number;            // (M) base de calcul CNPS/CMU = brutImposable + indemniteRespNonTaxable
   parts: number;                 // Nombre de parts fiscales (quotient familial)
   impotsBrut: number;            // Barème IGR progressif appliqué au brut imposable
   ricf: number;                  // Réduction d'Impôt pour Charges de Famille
@@ -1552,7 +1242,7 @@ function computeSocialDeductions(emp: Employee, brutImposableAvantAbsence: numbe
   // salaires l'excluent).
   const indemniteRespNonTaxable = c.indemniteResponsabiliteNonTaxable || 0;
   const totalBrut = brutImposable + brutNonImposable + indemniteRespNonTaxable;
-  const brutSocial = totalBrut;
+  const brutSocial = brutImposable + indemniteRespNonTaxable;
 
   const parts = computeFiscalParts(emp.familySituation, emp.numberOfChildren);
   const impotsBrut = computeIGRBrut(brutImposable);
@@ -1654,23 +1344,6 @@ function monthRange(year: number, month: number): { start: string; end: string; 
   return { start, end, label };
 }
 
-// Découpe une plage de dates LIBRE (choisie par l'utilisateur) en mois calendaires successifs —
-// permet à "Livre de paie fin d'année" et "Charges sociales" d'accepter n'importe quelle période
-// "du ... au ..." plutôt qu'une année/un mois figé.
-function monthsInRange(startISO: string, endISO: string): { start: string; end: string; label: string }[] {
-  if (!startISO || !endISO || startISO > endISO) return [];
-  const [sy, sm] = startISO.split('-').map(Number);
-  const [ey, em] = endISO.split('-').map(Number);
-  const result: { start: string; end: string; label: string }[] = [];
-  let y = sy, m = sm, guard = 0;
-  while ((y < ey || (y === ey && m <= em)) && guard < 120) { // garde-fou : 10 ans max
-    result.push(monthRange(y, m));
-    m++; if (m > 12) { m = 1; y++; }
-    guard++;
-  }
-  return result;
-}
-
 /* ── FICHE DE PAIE (Bulletin) ── */
 // Ligne du bulletin
 function PaySlipRow({ code, label, base, taux, gain, retenue }: {
@@ -1696,6 +1369,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   const { emp, ot, netToPay, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
   const c = getComponents(emp);
   const isCadre = emp.professionalStatus === 'Cadre';
+  const [exportOpen, setExportOpen] = useState(false);
 
   const { brutImposable, totalBrut, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer } = social;
   const primeFonctionImposable = c.representation + c.responsibility;
@@ -1706,28 +1380,152 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   const pfBase = Math.min(social.brutSocial, CHARGES_PATRONALES.prestationFamilialeBase);
   const prestationFamiliale = Math.round(pfBase * CHARGES_PATRONALES.prestationFamilialeTaux);
   const atBase = Math.min(social.brutSocial, CHARGES_PATRONALES.accidentTravailBase);
-  const accidentTravail = Math.round(atBase * (parametresGeneraux.accidentTravailTauxPct / 100));
+  const accidentTravail = Math.round(atBase * CHARGES_PATRONALES.accidentTravailTaux);
   const isLocal = Math.round(social.brutSocial * CHARGES_PATRONALES.isLocalTaux);
   const taxeApprentissage = Math.round(social.brutSocial * CHARGES_PATRONALES.taxeApprentissageTaux);
   const taxeFPC = Math.round(social.brutSocial * CHARGES_PATRONALES.taxeFPCTaux);
 
   const site = sites.find(s => s.id === emp.siteId);
 
+  // Lignes "gains" et "retenues" du bulletin — construites une seule fois et réutilisées
+  // à la fois pour l'affichage (tableau JSX ci-dessous) et pour les exports Excel/CSV, afin
+  // d'éviter toute divergence entre ce qui s'affiche et ce qui s'exporte.
+  type SlipLine = { code?: string; label: string; base?: number; taux?: string; gain?: number; retenue?: number };
+  const gainRows: SlipLine[] = [
+    { code: '10', label: 'SALAIRE', base: c.baseSalary, taux: `${joursPayes} j`, gain: baseSalaryProrated },
+    ...(c.sursalaire > 0 ? [{ code: '11', label: 'SURSALAIRE', base: c.sursalaire, taux: `${joursPayes} j`, gain: sursalaireProrated }] : []),
+    ...(ancienneteAmount > 0 ? [{ code: '15', label: 'PRIME ANCIENNETÉ', base: c.baseSalary, taux: `${ancienneteRatePct}%`, gain: ancienneteAmount }] : []),
+    ...(primeFonctionImposable > 0 ? [{ code: '20', label: 'PRIME DE FONCTION', base: primeFonctionImposable, gain: primeFonctionImposable }] : []),
+    ...(c.primeFonctionNonImposable > 0 ? [{ code: '21', label: 'PRIME DE FONCTION NON IMPOSABLE', base: c.primeFonctionNonImposable, gain: c.primeFonctionNonImposable }] : []),
+    ...(c.indemniteResponsabiliteNonTaxable > 0 ? [{ code: '26', label: 'INDEMNITÉ DE RESPONSABILITÉ NON TAXABLE', base: c.indemniteResponsabiliteNonTaxable, gain: c.indemniteResponsabiliteNonTaxable }] : []),
+    ...(c.housing > 0 ? [{ code: '22', label: 'INDEMNITÉ DE LOGEMENT', base: c.housing, gain: c.housing }] : []),
+    ...(c.performance > 0 ? [{ code: '23', label: 'PRIME DE RENDEMENT', base: c.performance, gain: c.performance }] : []),
+    ...(c.boisson > 0 ? [{ code: '24', label: 'PRIME DE BOISSON', base: c.boisson, gain: c.boisson }] : []),
+    ...(c.other > 0 ? [{ code: '76', label: 'GRATIFICATION / AUTRES PRIMES', base: c.other, gain: c.other }] : []),
+    ...OVERTIME_RATES.filter(r => ot[r.key] > 0).map(r => ({
+      code: '12', label: `HEURE SUPPLÉMENTAIRE +${r.label}`, taux: `${ot[r.key]} h`,
+      gain: Math.round(ot[r.key] * row.hourlyRate * (1 + r.rate)),
+    })),
+  ];
+  const retenueRows: SlipLine[] = [
+    { code: '401', label: 'IMPÔTS BRUT (avant RICF)', base: brutImposable, taux: 'barème IGR', retenue: impotsBrut },
+    { code: '402', label: 'RICF (réduction charges de famille)', taux: `${parts} parts`, gain: ricf },
+    { code: '400', label: 'I.T.S (Impôt sur Traitements et Salaires)', base: brutImposable, retenue: its },
+    { code: '38', label: 'RETRAITE GÉNÉRALE (CNPS)', base: social.brutSocial, taux: '6,3%', retenue: cnps },
+    { code: '45', label: 'CMU / CNAM', retenue: cnam },
+    ...(pret > 0 ? [{ code: '440', label: 'PRÊT', retenue: pret }] : []),
+    ...(acompte > 0 ? [{ code: '441', label: 'ACOMPTE SUR SALAIRE', retenue: acompte }] : []),
+    ...(assurance > 0 ? [{ code: '460', label: 'ASSURANCE MALADIE', retenue: assurance }] : []),
+  ];
+  const transportRow: SlipLine | null = transportNonImposable > 0
+    ? { code: '655', label: 'INDEMNITÉ DE TRANSPORT (non imposable)', gain: transportNonImposable }
+    : null;
+
+  const slipFileBase = `Bulletin_${(emp.matricule || emp.lastName || 'employe').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${periodStart.slice(0, 7)}`;
+
+  // Export Excel : fichier .xls (table HTML interprétée nativement par Excel), sans
+  // dépendance externe ni build supplémentaire — robuste pour un déploiement Vercel.
+  function exportExcel() {
+    const line = (l: SlipLine) => `<tr>
+      <td>${escHtml(l.code || '')}</td><td>${escHtml(l.label)}</td>
+      <td align="right">${l.base != null ? l.base.toLocaleString('fr-FR') : ''}</td>
+      <td align="center">${escHtml(l.taux || '')}</td>
+      <td align="right">${l.gain ? l.gain.toLocaleString('fr-FR') : ''}</td>
+      <td align="right">${l.retenue ? l.retenue.toLocaleString('fr-FR') : ''}</td>
+    </tr>`;
+    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8" />
+<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+<x:Name>Bulletin</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+<style>table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11px;}
+td,th{border:1px solid #cbd5e1;padding:3px 6px;} th{background:#e2e8f0;font-weight:bold;}
+.tot{background:#f1f5f9;font-weight:bold;} .title{font-size:14px;font-weight:bold;}</style></head>
+<body>
+<table>
+<tr><td class="title" colspan="6">${escHtml(site?.name || '')}</td></tr>
+<tr><td colspan="6">${escHtml(`${site?.address || ''}, ${site?.city || ''}`)}</td></tr>
+<tr><td colspan="6">${escHtml(`CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`)}</td></tr>
+<tr><td colspan="6"></td></tr>
+<tr><td class="title" colspan="6">BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}</td></tr>
+<tr><td colspan="6"></td></tr>
+<tr><td>Matricule</td><td>${escHtml(emp.matricule || '—')}</td><td>N° CNPS</td><td>${escHtml(emp.cnpsNumber || '—')}</td><td>Nom &amp; Prénom</td><td>${escHtml(`${emp.lastName} ${emp.firstName}`)}</td></tr>
+<tr><td>Fonction</td><td>${escHtml(emp.position)}</td><td>Catégorie</td><td>${escHtml(emp.category || '—')}</td><td>Date d'embauche</td><td>${fmt(emp.startDate)}</td></tr>
+<tr><td>Situation familiale</td><td>${escHtml(emp.familySituation || '—')}</td><td>Enfants</td><td>${emp.numberOfChildren ?? 0}</td><td>Parts</td><td>${parts}</td></tr>
+<tr><td colspan="6"></td></tr>
+<tr><th>Code</th><th>Rubrique</th><th>Base</th><th>Taux/Nb</th><th>Gains</th><th>Retenue</th></tr>
+${gainRows.map(line).join('')}
+<tr class="tot"><td colspan="4">TOTAL BRUT</td><td align="right">${totalBrut.toLocaleString('fr-FR')}</td><td></td></tr>
+${retenueRows.map(line).join('')}
+<tr class="tot"><td colspan="4">TOTAL DES RETENUES</td><td></td><td align="right">${totalRetenues.toLocaleString('fr-FR')}</td></tr>
+${transportRow ? line(transportRow) : ''}
+<tr><td colspan="6"></td></tr>
+<tr class="tot"><td colspan="2">NET À PAYER</td><td colspan="4" align="right">${netAPayer.toLocaleString('fr-FR')} FCFA</td></tr>
+<tr><td colspan="6"></td></tr>
+<tr><td class="title" colspan="6">Charges patronales (indicatif)</td></tr>
+<tr><td>CNPS retraite patronale (7,7%)</td><td align="right">${cnpsPatronal.toLocaleString('fr-FR')}</td><td>Prestation familiale (5,75%)</td><td align="right">${prestationFamiliale.toLocaleString('fr-FR')}</td><td>Accident du travail (2%)</td><td align="right">${accidentTravail.toLocaleString('fr-FR')}</td></tr>
+<tr><td>IS local (1,2%)</td><td align="right">${isLocal.toLocaleString('fr-FR')}</td><td>Taxe d'apprentissage (0,4%)</td><td align="right">${taxeApprentissage.toLocaleString('fr-FR')}</td><td>Taxe FPC (1,2%)</td><td align="right">${taxeFPC.toLocaleString('fr-FR')}</td></tr>
+</table>
+</body></html>`;
+    downloadTextFile(`${slipFileBase}.xls`, html, 'application/vnd.ms-excel;charset=utf-8');
+    setExportOpen(false);
+  }
+
+  // Export CSV : données brutes du bulletin, séparateur ";" (convention Excel FR) + BOM
+  // UTF-8 pour un affichage correct des accents.
+  function exportCSV() {
+    const rows: string[] = [];
+    const csvLine = (...cells: (string | number)[]) => rows.push(cells.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';'));
+    csvLine(site?.name || '', '', '', '', '', '');
+    csvLine('Bulletin de paie', `Du ${fmt(periodStart)}`, `Au ${fmt(periodEnd)}`);
+    csvLine('Matricule', emp.matricule || '—', 'Nom & Prénom', `${emp.lastName} ${emp.firstName}`);
+    csvLine('Fonction', emp.position, 'Catégorie', emp.category || '—');
+    csvLine('');
+    csvLine('Code', 'Rubrique', 'Base', 'Taux/Nb', 'Gains', 'Retenue');
+    gainRows.forEach(l => csvLine(l.code || '', l.label, l.base ?? '', l.taux || '', l.gain || '', l.retenue || ''));
+    csvLine('', 'TOTAL BRUT', '', '', totalBrut, '');
+    retenueRows.forEach(l => csvLine(l.code || '', l.label, l.base ?? '', l.taux || '', l.gain || '', l.retenue || ''));
+    csvLine('', 'TOTAL DES RETENUES', '', '', '', totalRetenues);
+    if (transportRow) csvLine(transportRow.code || '', transportRow.label, '', '', transportRow.gain || '', '');
+    csvLine('');
+    csvLine('NET À PAYER', netAPayer);
+    downloadTextFile(`${slipFileBase}.csv`, '﻿' + rows.join('\r\n'), 'text/csv;charset=utf-8');
+    setExportOpen(false);
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
+    <div className="print-root fixed inset-0 z-50 flex items-center justify-center p-4 print:p-0 print:static print:block">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm no-print" onClick={onClose} />
+      <div className="print-area relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto print:max-w-none print:max-h-none print:h-auto print:w-full print:overflow-visible print:shadow-none print:rounded-none">
         {/* En-tête modale */}
-        <div className="sticky top-0 bg-white px-6 py-3 border-b border-slate-100 flex items-center justify-between z-10">
+        <div className="no-print sticky top-0 bg-white px-6 py-3 border-b border-slate-100 flex items-center justify-between z-10">
           <h3 className="text-sm font-bold text-slate-800">Bulletin de paie {isCadre ? '— CADRE' : `— ${emp.professionalStatus.toUpperCase()}`}</h3>
           <div className="flex items-center gap-2">
-            <button onClick={() => window.print()} className="px-3 py-1.5 text-[11px] font-semibold bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 flex items-center gap-1.5"><Ico name="print" size={13} /> Imprimer</button>
+            <button onClick={() => window.print()} className="px-3 py-1.5 text-[11px] font-semibold bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 flex items-center gap-1.5"><Ico name="print" size={13} /> Imprimer / PDF</button>
+            <div className="relative">
+              <button onClick={() => setExportOpen(o => !o)} className="px-3 py-1.5 text-[11px] font-semibold bg-orange-50 text-orange-700 rounded-lg hover:bg-orange-100 flex items-center gap-1.5">
+                <Ico name="download" size={13} /> Exporter <Ico name="chevronDown" size={12} className={cn('transition-transform duration-150', exportOpen ? 'rotate-180' : '')} />
+              </button>
+              {exportOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setExportOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-20">
+                    <button onClick={exportExcel} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                      <Ico name="download" size={12} /> Excel (.xls)
+                    </button>
+                    <button onClick={exportCSV} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                      <Ico name="download" size={12} /> CSV (.csv)
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
             <button onClick={onClose} className="text-slate-400 hover:text-slate-600 p-1"><Ico name="close" size={18} /></button>
           </div>
         </div>
 
         {/* Corps : Bulletin */}
-        <div className="p-6">
+        <div className="p-6 print:p-0 print-body">
           <div className={cn('border-2 rounded-lg overflow-hidden', isCadre ? 'border-indigo-300' : 'border-slate-300')}>
             {/* Bandeau titre + logo */}
             <div className={cn('flex items-start justify-between p-4 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
@@ -1791,23 +1589,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 </tr>
               </thead>
               <tbody>
-                <PaySlipRow code="10" label="SALAIRE" base={c.baseSalary} taux={`${joursPayes} j`} gain={baseSalaryProrated} />
-                {c.sursalaire > 0 && <PaySlipRow code="11" label="SURSALAIRE" base={c.sursalaire} taux={`${joursPayes} j`} gain={sursalaireProrated} />}
-                {ancienneteAmount > 0 && <PaySlipRow code="15" label="PRIME ANCIENNETÉ" base={c.baseSalary} taux={`${ancienneteRatePct}%`} gain={ancienneteAmount} />}
-                {primeFonctionImposable > 0 && <PaySlipRow code="20" label="PRIME DE FONCTION" base={primeFonctionImposable} gain={primeFonctionImposable} />}
-                {c.primeFonctionNonImposable > 0 && <PaySlipRow code="21" label="PRIME DE FONCTION NON IMPOSABLE" base={c.primeFonctionNonImposable} gain={c.primeFonctionNonImposable} />}
-                {c.indemniteResponsabiliteNonTaxable > 0 && <PaySlipRow code="26" label="INDEMNITÉ DE RESPONSABILITÉ NON TAXABLE" base={c.indemniteResponsabiliteNonTaxable} gain={c.indemniteResponsabiliteNonTaxable} />}
-                {c.housing > 0 && <PaySlipRow code="22" label="INDEMNITÉ DE LOGEMENT" base={c.housing} gain={c.housing} />}
-                {c.performance > 0 && <PaySlipRow code="23" label="PRIME DE RENDEMENT" base={c.performance} gain={c.performance} />}
-                {c.boisson > 0 && <PaySlipRow code="24" label="PRIME DE BOISSON" base={c.boisson} gain={c.boisson} />}
-                {c.otherAmount1 > 0 && <PaySlipRow code="76" label={(c.otherLabel1 || 'AUTRE PRIME 1').toUpperCase()} base={c.otherAmount1} gain={c.otherAmount1} />}
-                {c.otherAmount2 > 0 && <PaySlipRow code="77" label={(c.otherLabel2 || 'AUTRE PRIME 2').toUpperCase()} base={c.otherAmount2} gain={c.otherAmount2} />}
-
-                {/* Heures supplémentaires par taux */}
-                {OVERTIME_RATES.map(r => ot[r.key] > 0 && (
-                  <PaySlipRow key={r.key} code="12" label={`HEURE SUPPLÉMENTAIRE +${r.label}`}
-                    taux={`${ot[r.key]} h`} gain={Math.round(ot[r.key] * row.hourlyRate * (1 + r.rate))} />
-                ))}
+                {gainRows.map((r, i) => <PaySlipRow key={`g${i}`} {...r} />)}
 
                 <tr className="bg-slate-50 font-bold border-y border-slate-200">
                   <td colSpan={4} className="px-2 py-1.5 text-[11px] text-slate-700">TOTAL BRUT</td>
@@ -1816,14 +1598,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 </tr>
 
                 {/* Cotisations salariales */}
-                <PaySlipRow code="401" label="IMPÔTS BRUT (avant RICF)" base={brutImposable} taux="barème IGR" retenue={impotsBrut} />
-                <PaySlipRow code="402" label="RICF (réduction charges de famille)" taux={`${parts} parts`} gain={ricf} />
-                <PaySlipRow code="400" label="I.T.S (Impôt sur Traitements et Salaires)" base={brutImposable} retenue={its} />
-                <PaySlipRow code="38" label="RETRAITE GÉNÉRALE (CNPS)" base={social.brutSocial} taux="6,3%" retenue={cnps} />
-                <PaySlipRow code="45" label="CMU / CNAM" retenue={cnam} />
-                {pret > 0 && <PaySlipRow code="440" label="PRÊT" retenue={pret} />}
-                {acompte > 0 && <PaySlipRow code="441" label="ACOMPTE SUR SALAIRE" retenue={acompte} />}
-                {assurance > 0 && <PaySlipRow code="460" label="ASSURANCE MALADIE" retenue={assurance} />}
+                {retenueRows.map((r, i) => <PaySlipRow key={`r${i}`} {...r} />)}
 
                 <tr className="bg-slate-50 font-bold border-y border-slate-200">
                   <td colSpan={4} className="px-2 py-1.5 text-[11px] text-slate-700">TOTAL DES RETENUES</td>
@@ -1832,7 +1607,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
                 </tr>
 
                 {/* Indemnité non imposable, versée hors brut/cotisations */}
-                {transportNonImposable > 0 && <PaySlipRow code="655" label="INDEMNITÉ DE TRANSPORT (non imposable)" gain={transportNonImposable} />}
+                {transportRow && <PaySlipRow {...transportRow} />}
               </tbody>
             </table>
 
@@ -1858,7 +1633,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
               <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-[10px] text-slate-600">
                 <div className="flex justify-between"><span>CNPS retraite patronale (7,7%)</span><span className="font-semibold">{formatFCFA(cnpsPatronal)}</span></div>
                 <div className="flex justify-between"><span>Prestation familiale (5,75%)</span><span className="font-semibold">{formatFCFA(prestationFamiliale)}</span></div>
-                <div className="flex justify-between"><span>Accident du travail ({parametresGeneraux.accidentTravailTauxPct}%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
+                <div className="flex justify-between"><span>Accident du travail (2%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
                 <div className="flex justify-between"><span>Part patronale IS local (1,2%)</span><span className="font-semibold">{formatFCFA(isLocal)}</span></div>
                 <div className="flex justify-between"><span>Taxe d'apprentissage (0,4%)</span><span className="font-semibold">{formatFCFA(taxeApprentissage)}</span></div>
                 <div className="flex justify-between"><span>Taxe FPC (1,2%)</span><span className="font-semibold">{formatFCFA(taxeFPC)}</span></div>
@@ -1909,7 +1684,6 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   const [periodEnd, setPeriodEnd] = useState(currentMonth.end);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const [otEditor, setOtEditor] = useState<{ emp: Employee; overtime: OvertimeHours } | null>(null);
-  const [showExport, setShowExport] = useState(false);
 
   // Enregistre (ou crée) la saisie manuelle de paie variable d'un employé pour le mois de
   // periodStart, et prévient toute l'application que les données ont changé (bump).
@@ -1929,26 +1703,6 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
   const payroll = useMemo(() => {
     return filtered.map(emp => ({ emp, ...computeEmployeePayrollForPeriod(emp, periodStart, periodEnd) }));
   }, [filtered, periodStart, periodEnd, version]);
-
-  const buildPaieExportRows = useCallback((): ExportRow[] => payroll.map((r, i) => {
-    const c = getComponents(r.emp);
-    const { months } = computeAncienneteRate(r.emp.startDate, periodEnd);
-    const primeFonction = c.representation + c.responsibility + c.housing + c.performance + c.boisson + c.other;
-    return {
-      n: i + 1, matricule: r.emp.matricule || '', nom: r.emp.lastName, prenoms: r.emp.firstName,
-      joursPayes: r.joursPayes, heureSup: r.heuresSup, salaireBase: r.baseSalaryProrated, sursalaire: r.sursalaireProrated,
-      heureSuppl: r.overtimePay, primeAnciennete: r.ancienneteAmount, primeFonctionNonImp: c.primeFonctionNonImposable,
-      indemniteRespNonTax: r.social.indemniteRespNonTaxable, primeFonction, totalBrut: r.social.totalBrut,
-      brutImposable: r.social.brutImposable, brutSocial: r.social.brutSocial, dateEmbauche: r.emp.startDate, dureeMois: months,
-      tauxAnc: r.ancienneteRatePct, situationFam: r.emp.familySituation || '', enfants: r.emp.numberOfChildren ?? 0,
-      parts: r.social.parts, impotsBrut: r.social.impotsBrut, ricf: r.social.ricf, its: r.social.its, cnps: r.social.cnps,
-      cnam: r.social.cnam, prets: r.social.pret, indemniteTransport: r.social.transportNonImposable, salaireNet: r.netToPay,
-    };
-  }), [payroll, periodEnd]);
-
-  useEffect(() => {
-    exportRegistry['paye'] = { title: 'Livre de paie', tableClass: 'paie-table', columns: PAIE_EXPORT_COLUMNS, buildRows: buildPaieExportRows };
-  }, [buildPaieExportRows]);
 
   // Dès qu'un employé apparaît dans "Paie" pour la période affichée, on enregistre
   // IMMÉDIATEMENT une saisie par défaut (30 j, 0 h sup) s'il n'en a pas encore — pour que ce
@@ -2010,20 +1764,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
         <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
         <span className="text-[10px] text-slate-400 ml-2">Jours payés et heures sup. saisis manuellement · cliquez sur une ligne pour ouvrir le bulletin</span>
-        <button onClick={() => setShowExport(true)} className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 text-xs font-semibold rounded-xl hover:bg-slate-50 ml-auto">
-          <Ico name="exportFile" size={14} /> Exporter
-        </button>
       </div>
-
-      {showExport && (
-        <ExportModal
-          title="Livre de paie"
-          columns={PAIE_EXPORT_COLUMNS}
-          buildRows={buildPaieExportRows}
-          onClose={() => setShowExport(false)}
-          onPrint={(hidden) => applyPrintColumnFilter('paie-table', PAIE_EXPORT_COLUMNS.map(c => c.key), hidden)}
-        />
-      )}
 
       {/* Cartes statistiques globales */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2058,14 +1799,14 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
           </p>
         </div>
 
-        <div className="overflow-auto max-h-[70vh]">
-          <table className="w-full text-left paie-table">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[32px]">N°</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[70px]">Matricule</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Nom</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Prénoms</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Matricule</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : jours réellement payés sur le mois">Jours payés</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-indigo-500 uppercase text-center whitespace-nowrap" title="Saisie manuelle : heures supplémentaires du mois">H. sup</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base</th>
@@ -2162,7 +1903,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
                 <LP_Td value={T.totalBrut} colorClass="text-emerald-700" />
                 <LP_Td value={T.brutImposable} />
                 <LP_Td value={T.brutSocial} />
-                <td colSpan={4}></td>
+                <td colSpan={3}></td>
                 <td className="px-2.5 py-2.5 text-[11px] text-slate-500 text-center">{T.enfants}</td>
                 <td className="px-2.5 py-2.5 text-[11px] text-slate-500 text-center">{T.parts}</td>
                 <LP_Td value={T.impotsBrut} colorClass="text-red-600" />
@@ -2188,7 +1929,7 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
       {payslip && <PaySlipModal row={payslip} periodStart={periodStart} periodEnd={periodEnd} onClose={() => setPayslip(null)} />}
 
       {/* Éditeur d'heures supplémentaires (saisie manuelle, 5 taux de majoration) */}
-      <Modal open={!!otEditor} onClose={() => setOtEditor(null)} title={otEditor ? `Heures sup. — ${otEditor.emp.lastName} ${otEditor.emp.firstName}` : ''}>
+      <Modal open={!!otEditor} onClose={() => setOtEditor(null)} title={otEditor ? `Heures sup. — ${otEditor.emp.firstName} ${otEditor.emp.lastName}` : ''}>
         {otEditor && (
           <div className="space-y-3">
             {OVERTIME_RATES.map(r => (
@@ -2213,293 +1954,6 @@ function PayePage({ filtered }: { filtered: Employee[] }) {
 
 
 /* ══════════════════════════════════════════════════════ */
-/* RECONSTITUTION DU SALAIRE DE BASE À PARTIR DU BRUT       */
-/* ══════════════════════════════════════════════════════ */
-// Calcul INVERSE de celui du bulletin (voir computeSocialDeductions / computeEmployeePayrollForPeriod) :
-// on connaît le TOTAL BRUT visé pour un mois complet (30 j, sans absence) et on en déduit le
-// "salaire de base" à inscrire, sachant que toutes les autres rubriques ci-dessous restent
-// FIXES (indépendantes du salaire de base) SAUF la prime d'ancienneté, qui est un pourcentage
-// du salaire de base : TotalBrut = base × (1 + tauxAncienneté) + (somme des rubriques fixes)
-// ⇒ base = (TotalBrut − somme des rubriques fixes) / (1 + tauxAncienneté)
-// Champ numérique — déclaré au niveau module (et non à l'intérieur de ReconstitutionPage) pour
-// que son identité reste stable entre deux rendus. Une fonction composant redéfinie à chaque
-// rendu force React à démonter/remonter le <input> à chaque frappe, ce qui fait perdre le focus
-// et mélange les caractères saisis — c'est ce qui causait le bug de saisie signalé.
-function NumField({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint?: string }) {
-  return (
-    <div className="space-y-1">
-      <label className="text-xs font-semibold text-slate-600">{label}</label>
-      <input type="number" value={value || ''} onChange={e => onChange(Number(e.target.value) || 0)}
-        placeholder="0"
-        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300" />
-      {hint && <p className="text-[10px] text-slate-400">{hint}</p>}
-    </div>
-  );
-}
-
-// Employé "gabarit" pour les besoins du calcul de Reconstitution : seuls familySituation,
-// numberOfChildren, cnamAmount, pret, acompte, assurance et components sont réellement lus par
-// computeSocialDeductions — tous les autres champs sont des valeurs neutres sans incidence.
-function makeVirtualEmployee(overrides: Partial<Employee>): Employee {
-  return {
-    id: '__reconstitution__', firstName: '', lastName: '', email: '', phone: '', position: '',
-    department: '', siteId: '', contractType: 'CDI', startDate: '', salary: 0,
-    components: emptyComponents(), status: 'Actif', professionalStatus: 'Cadre', category: '',
-    avatarColor: '#000000',
-    ...overrides,
-  };
-}
-
-// Page "Reconstitution" — calcule le SALAIRE DE BASE à partir du NET À PAYER connu (et non plus
-// du brut), en tenant compte de l'IGR progressif, du quotient familial (RICF) et de toutes les
-// retenues/indemnités du bulletin réel. L'IGR n'étant pas inversible algébriquement (barème par
-// tranches), on procède par recherche dichotomique : on essaie des salaires de base successifs
-// avec exactement la même fonction que le bulletin (computeSocialDeductions), jusqu'à obtenir le
-// net à payer visé à l'unité près.
-function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
-  const { bump } = useContext(DataVersionContext);
-  const [employeeId, setEmployeeId] = useState('');
-  const [targetNet, setTargetNet] = useState(0);
-  const [joursTravailles, setJoursTravailles] = useState(JOURS_MOIS_PAIE);
-  const [sursalaire, setSursalaire] = useState(0);
-  const [ancienneteRatePct, setAncienneteRatePct] = useState(0);
-  const [primeFonctionImposable, setPrimeFonctionImposable] = useState(0);
-  const [primeFonctionNonImposable, setPrimeFonctionNonImposable] = useState(0);
-  const [autresPrimesImposables, setAutresPrimesImposables] = useState(0);
-  const [indemniteRespNonTaxable, setIndemniteRespNonTaxable] = useState(0);
-  const [heuresSupFcfa, setHeuresSupFcfa] = useState(0);
-  const [transport, setTransport] = useState(0);
-  const [familySituation, setFamilySituation] = useState<FamilySituation>('Célibataire');
-  const [numberOfChildren, setNumberOfChildren] = useState(0);
-  const [cnamAmount, setCnamAmount] = useState(0);
-  const [pret, setPret] = useState(0);
-  const [acompte, setAcompte] = useState(0);
-  const [assurance, setAssurance] = useState(0);
-  const [applied, setApplied] = useState(false);
-
-  const selectedEmp = filtered.find(e => e.id === employeeId) || null;
-
-  // Pré-remplissage à partir d'un employé existant (reste ensuite librement modifiable)
-  function applyEmployeePreset(id: string) {
-    setEmployeeId(id);
-    setApplied(false);
-    const emp = filtered.find(e => e.id === id);
-    if (!emp) return;
-    const c = getComponents(emp);
-    setSursalaire(c.sursalaire);
-    setPrimeFonctionImposable(c.representation + c.responsibility);
-    setAutresPrimesImposables(c.housing + c.performance + c.boisson + c.other);
-    setPrimeFonctionNonImposable(c.primeFonctionNonImposable);
-    setIndemniteRespNonTaxable(c.indemniteResponsabiliteNonTaxable);
-    setTransport(c.transport);
-    setHeuresSupFcfa(0);
-    setFamilySituation(emp.familySituation || 'Célibataire');
-    setNumberOfChildren(emp.numberOfChildren ?? 0);
-    setCnamAmount(emp.cnamAmount ?? 0);
-    setPret(emp.pret ?? 0);
-    setAcompte(emp.acompte ?? 0);
-    setAssurance(emp.assurance ?? 0);
-    const { ratePct } = computeAncienneteRate(emp.startDate, new Date().toISOString().slice(0, 10));
-    setAncienneteRatePct(ratePct);
-  }
-
-  // Enveloppe chaque setter pour réinitialiser le badge "Enregistré" dès qu'un champ change
-  const upd = (setter: (v: number) => void) => (v: number) => { setApplied(false); setter(v); };
-  const updJours = (v: number) => { setApplied(false); setJoursTravailles(Math.max(1, Math.min(JOURS_MOIS_PAIE, v))); };
-
-  // Calcule le bulletin complet (exactement comme computeSocialDeductions) pour un salaire de
-  // base candidat donné — utilisé à la fois par la recherche dichotomique et par l'affichage final.
-  function evaluateForBase(trialBase: number) {
-    const joursRatio = joursTravailles / JOURS_MOIS_PAIE;
-    const baseSalaryProrated = Math.round(trialBase * joursRatio);
-    const sursalaireProrated = Math.round(sursalaire * joursRatio);
-    const deduction = (trialBase + sursalaire) - (baseSalaryProrated + sursalaireProrated);
-    const ancienneteAmount = Math.floor(trialBase * (ancienneteRatePct / 100));
-    const brutImposableAvantAbsence = trialBase + sursalaire + heuresSupFcfa + ancienneteAmount + primeFonctionImposable + autresPrimesImposables;
-    const virtualEmp = makeVirtualEmployee({
-      familySituation, numberOfChildren, cnamAmount, pret, acompte, assurance,
-      components: {
-        baseSalary: trialBase, sursalaire, seniority: 0, housing: 0, transport,
-        representation: primeFonctionImposable, responsibility: 0, performance: 0, boisson: 0,
-        other: autresPrimesImposables, otherAmount1: autresPrimesImposables, otherAmount2: 0,
-        primeFonctionNonImposable, indemniteResponsabiliteNonTaxable: indemniteRespNonTaxable,
-      },
-    });
-    const social = computeSocialDeductions(virtualEmp, brutImposableAvantAbsence, deduction);
-    return { social, ancienneteAmount, baseSalaryProrated, sursalaireProrated };
-  }
-
-  // Recherche dichotomique : le net à payer croît avec le salaire de base (même si l'IGR est
-  // progressif par tranches, la fonction reste croissante), donc la bissection converge de façon
-  // fiable — contrairement à l'IGR, elle n'a pas besoin d'être inversée analytiquement.
-  const { baseReconstitue, result } = useMemo(() => {
-    if (targetNet <= 0) return { baseReconstitue: 0, result: evaluateForBase(0) };
-    let lo = 0;
-    let hi = Math.max(targetNet * 4, 5_000_000);
-    for (let i = 0; i < 60; i++) {
-      const mid = (lo + hi) / 2;
-      const net = evaluateForBase(mid).social.netAPayer;
-      if (net < targetNet) lo = mid; else hi = mid;
-    }
-    const base = Math.round((lo + hi) / 2);
-    return { baseReconstitue: base, result: evaluateForBase(base) };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetNet, joursTravailles, sursalaire, ancienneteRatePct, primeFonctionImposable, primeFonctionNonImposable, autresPrimesImposables, indemniteRespNonTaxable, heuresSupFcfa, transport, familySituation, numberOfChildren, cnamAmount, pret, acompte, assurance]);
-
-  const { social, ancienneteAmount, baseSalaryProrated, sursalaireProrated } = result;
-  const ecart = targetNet - social.netAPayer;
-  const valid = targetNet > 0 && baseReconstitue > 0;
-
-  function applyToEmployee() {
-    if (!selectedEmp || !valid) return;
-    const emp = employees.find(e => e.id === selectedEmp.id);
-    if (!emp) return;
-    emp.components.baseSalary = baseReconstitue;
-    emp.salary = computeSalary(emp.components);
-    persistDoc('employees', emp.id, emp);
-    bump();
-    setApplied(true);
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-        <h3 className="text-sm font-bold text-slate-800 mb-1">Reconstituer le salaire de base à partir du net à payer</h3>
-        <p className="text-xs text-slate-400 mb-5">
-          Saisissez le <b>net à payer</b> connu ainsi que les rubriques fixes de l'employé (sursalaire, primes, situation familiale...) —
-          l'outil recalcule le <b>salaire de base</b> en reproduisant exactement le bulletin de paie (IGR progressif, RICF, CNPS...), à l'envers.
-        </p>
-
-        <div className="space-y-1 mb-5">
-          <label className="text-xs font-semibold text-slate-600">Pré-remplir depuis un employé existant (optionnel)</label>
-          <select value={employeeId} onChange={e => applyEmployeePreset(e.target.value)}
-            className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
-            <option value="">— Saisie manuelle —</option>
-            {filtered.map(e => <option key={e.id} value={e.id}>{e.lastName} {e.firstName} — {e.position}</option>)}
-          </select>
-        </div>
-
-        <div className="grid sm:grid-cols-2 gap-4 mb-2">
-          <div className="sm:col-span-2 bg-orange-50 border border-orange-200 rounded-xl p-4">
-            <NumField label="NET À PAYER visé (connu)" value={targetNet} onChange={upd(setTargetNet)}
-              hint="Le montant net que vous connaissez déjà (ex : le montant réellement versé à l'employé)." />
-          </div>
-
-          <NumField label="Nombre de jours travaillés" value={joursTravailles} onChange={updJours}
-            hint={`Sur ${JOURS_MOIS_PAIE} jours calendaires. Salaire de base et sursalaire sont proratisés en conséquence.`} />
-          <NumField label="Sursalaire" value={sursalaire} onChange={upd(setSursalaire)} />
-          <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={upd(setAncienneteRatePct)}
-            hint={selectedEmp ? "Calculé depuis la date d'embauche de l'employé (modifiable)." : "1% par année de service (2 à 25 ans), 25% max."} />
-          <NumField label="Prime de fonction (imposable)" value={primeFonctionImposable} onChange={upd(setPrimeFonctionImposable)}
-            hint="Représentation + responsabilité." />
-          <NumField label="Prime de fonction (non imposable)" value={primeFonctionNonImposable} onChange={upd(setPrimeFonctionNonImposable)} />
-          <NumField label="Indemnité de responsabilité (non taxable)" value={indemniteRespNonTaxable} onChange={upd(setIndemniteRespNonTaxable)} />
-          <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={upd(setAutresPrimesImposables)}
-            hint="Logement, performance, prime exceptionnelle, autre." />
-          <NumField label="Heures supplémentaires (FCFA)" value={heuresSupFcfa} onChange={upd(setHeuresSupFcfa)} />
-          <NumField label="Indemnité de transport (non imposable)" value={transport} onChange={upd(setTransport)}
-            hint="Ajoutée après les retenues, comme sur le bulletin." />
-
-          <div className="space-y-1">
-            <label className="text-xs font-semibold text-slate-600">Situation familiale</label>
-            <select value={familySituation} onChange={e => { setApplied(false); setFamilySituation(e.target.value as FamilySituation); }}
-              className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-orange-300">
-              <option value="Célibataire">Célibataire</option>
-              <option value="Marié(e)">Marié(e)</option>
-              <option value="Divorcé(e)">Divorcé(e)</option>
-              <option value="Veuf">Veuf</option>
-              <option value="Veuve">Veuve</option>
-            </select>
-            <p className="text-[10px] text-slate-400">Détermine le nombre de parts fiscales (RICF).</p>
-          </div>
-          <NumField label="Nombre d'enfants" value={numberOfChildren} onChange={upd(setNumberOfChildren)} />
-
-          <NumField label="CNAM / CMU" value={cnamAmount} onChange={upd(setCnamAmount)} />
-          <NumField label="Prêt (retenue)" value={pret} onChange={upd(setPret)} />
-          <NumField label="Acompte (retenue)" value={acompte} onChange={upd(setAcompte)} />
-          <NumField label="Assurance (retenue)" value={assurance} onChange={upd(setAssurance)} />
-        </div>
-      </div>
-
-      {targetNet > 0 && (
-        <div className="bg-white rounded-2xl border border-orange-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-4 bg-orange-50 border-b border-orange-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-orange-800">Résultat de la reconstitution</h3>
-            {selectedEmp && <span className="text-[11px] text-orange-600">Pour {selectedEmp.lastName} {selectedEmp.firstName}</span>}
-          </div>
-
-          <div className="p-5">
-            <div className="flex items-baseline gap-3 mb-5 flex-wrap">
-              <span className="text-xs font-semibold text-slate-500">Salaire de base reconstitué :</span>
-              <span className="text-2xl font-extrabold text-orange-700">{formatFCFA(baseReconstitue)}</span>
-              <span className="text-[11px] text-slate-400">(taux plein — 30 jours ; à inscrire sur la fiche employé)</span>
-            </div>
-
-            <table className="w-full text-left mb-4">
-              <thead><tr className="border-b border-slate-100">
-                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase">Rubrique</th>
-                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Base</th>
-                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Taux/Nb</th>
-                <th className="py-2 text-[10px] font-bold text-slate-400 uppercase text-right">Montant</th>
-              </tr></thead>
-              <tbody className="divide-y divide-slate-100">
-                <tr><td className="py-2 text-xs text-slate-700">SALAIRE (base)</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(baseReconstitue)}</td><td className="py-2 text-xs text-right text-slate-500">{joursTravailles} j</td><td className="py-2 text-xs text-right font-bold text-slate-800">{formatFCFA(baseSalaryProrated)}</td></tr>
-                {sursalaire > 0 && <tr><td className="py-2 text-xs text-slate-700">SURSALAIRE</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(sursalaire)}</td><td className="py-2 text-xs text-right text-slate-500">{joursTravailles} j</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(sursalaireProrated)}</td></tr>}
-                {ancienneteAmount > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME ANCIENNETÉ</td><td className="py-2 text-xs text-right text-slate-500">{formatFCFA(baseReconstitue)}</td><td className="py-2 text-xs text-right text-slate-500">{ancienneteRatePct}%</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(ancienneteAmount)}</td></tr>}
-                {primeFonctionImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionImposable)}</td></tr>}
-                {autresPrimesImposables > 0 && <tr><td className="py-2 text-xs text-slate-700">AUTRES PRIMES IMPOSABLES</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(autresPrimesImposables)}</td></tr>}
-                {primeFonctionNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">PRIME DE FONCTION NON IMPOSABLE</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(primeFonctionNonImposable)}</td></tr>}
-                {indemniteRespNonTaxable > 0 && <tr><td className="py-2 text-xs text-slate-700">INDEMNITÉ RESPONSABILITÉ (non taxable)</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(indemniteRespNonTaxable)}</td></tr>}
-                {heuresSupFcfa > 0 && <tr><td className="py-2 text-xs text-slate-700">HEURES SUPPLÉMENTAIRES</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-500">—</td><td className="py-2 text-xs text-right text-slate-600">{formatFCFA(heuresSupFcfa)}</td></tr>}
-                <tr className="border-t border-slate-200 font-bold"><td className="py-2 text-xs text-slate-700">TOTAL BRUT</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-emerald-700">{formatFCFA(social.totalBrut)}</td></tr>
-                <tr><td className="py-2 text-xs text-red-600">Impôts brut (barème IGR)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.impotsBrut)}</td></tr>
-                {social.ricf > 0 && <tr><td className="py-2 text-xs text-red-600">RICF ({social.parts} parts)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">+ {formatFCFA(social.ricf)}</td></tr>}
-                <tr><td className="py-2 text-xs text-red-600">ITS (impôt sur salaires)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.its)}</td></tr>
-                <tr><td className="py-2 text-xs text-red-600">CNPS (6,3%)</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.cnps)}</td></tr>
-                {social.cnam > 0 && <tr><td className="py-2 text-xs text-red-600">CNAM / CMU</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.cnam)}</td></tr>}
-                {social.pret > 0 && <tr><td className="py-2 text-xs text-red-600">Prêt</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.pret)}</td></tr>}
-                {social.acompte > 0 && <tr><td className="py-2 text-xs text-red-600">Acompte</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.acompte)}</td></tr>}
-                {social.assurance > 0 && <tr><td className="py-2 text-xs text-red-600">Assurance</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-red-500">− {formatFCFA(social.assurance)}</td></tr>}
-                {social.transportNonImposable > 0 && <tr><td className="py-2 text-xs text-slate-700">Indemnité transport</td><td colSpan={2}></td><td className="py-2 text-xs text-right text-slate-600">+ {formatFCFA(social.transportNonImposable)}</td></tr>}
-              </tbody>
-              <tfoot>
-                <tr className="border-t-2 border-slate-200 bg-slate-50 font-bold">
-                  <td colSpan={3} className="py-2 text-xs text-slate-700">NET À PAYER RECALCULÉ</td>
-                  <td className="py-2 text-sm text-right text-orange-700">{formatFCFA(social.netAPayer)}</td>
-                </tr>
-              </tfoot>
-            </table>
-
-            {!valid && (
-              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-                Les retenues et rubriques fixes saisies dépassent le net visé — impossible d'obtenir un salaire de base positif. Vérifiez vos montants.
-              </p>
-            )}
-            {valid && Math.abs(ecart) > 1 && (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-                Écart d'arrondi de {formatFCFA(Math.abs(ecart))} par rapport au net visé (dû aux arrondis à l'unité près) — négligeable en pratique.
-              </p>
-            )}
-
-            {selectedEmp && valid && (
-              <div className="flex items-center gap-3 mt-4 pt-4 border-t border-slate-100">
-                <button onClick={applyToEmployee}
-                  className="px-4 py-2.5 text-xs font-bold bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-colors shadow-sm shadow-orange-200">
-                  Appliquer ce salaire de base à la fiche de {selectedEmp.firstName}
-                </button>
-                {applied && <span className="text-xs font-semibold text-emerald-600 flex items-center gap-1"><Ico name="checkmark" size={14} /> Enregistré</span>}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-
-/* ══════════════════════════════════════════════════════ */
 /* CHARGES SOCIALES PATRONALES (CNPS + FDFP — Côte d'Ivoire) */
 /* ══════════════════════════════════════════════════════ */
 // NB : ces montants correspondent à la PART PATRONALE (coût employeur),
@@ -2516,9 +1970,13 @@ const TAUX_PRESTATIONS_FAMILIALES = 0.05;  // 5% dont 0,75% assurance maternité
 const TAUX_TAXE_APPRENTISSAGE = 0.004;     // 0,4% — FDFP, Taxe d'Apprentissage (TA)
 const TAUX_FORMATION_CONTINUE = 0.012;     // 1,2% — FDFP, Taxe additionnelle Formation Professionnelle Continue (TFPC)
 
-// Le taux Accidents du Travail / Maladies Professionnelles est désormais un réglage global
-// modifiable et persisté (voir parametresGeneraux / setAccidentTravailTauxPct plus haut),
-// partagé entre le bulletin, "Charges sociales" et le "Livre de paie en fin d'année".
+// Taux Accidents du Travail / Maladies Professionnelles — variable selon le secteur d'activité (2% à 5%)
+const AT_RATE_OPTIONS: { value: number; label: string }[] = [
+  { value: 0.02, label: '2% — Risque faible' },
+  { value: 0.03, label: '3% — Risque modéré (atelier / garage)' },
+  { value: 0.04, label: '4% — Risque élevé' },
+  { value: 0.05, label: '5% — Risque maximal' },
+];
 
 type EmployerSocialCharges = {
   baseRetraite: number; baseFamAT: number;
@@ -2548,16 +2006,6 @@ type ChargesPeriodMode = 'month' | 'semester' | 'year';
 // calendaires — chaque mois est calculé séparément à partir des présences réellement
 // saisies (comme dans "Paie"), puis les montants mensuels obtenus sont additionnés.
 // C'est cette somme "mois après mois" qui alimente ensuite les vues semestrielle et annuelle.
-const CHARGES_SOCIALES_EXPORT_COLUMNS: ExportColumn[] = [
-  { key: 'nom', label: 'Employé' }, { key: 'poste', label: 'Poste' }, { key: 'moisAvecDonnees', label: 'Mois avec données' },
-  { key: 'brutCumule', label: 'Brut réel cumulé' }, { key: 'retraitePatronale', label: 'CNPS Retraite (7,7%)' },
-  { key: 'prestationsFamiliales', label: 'Prest. familiales (5%)' }, { key: 'accidentsTravail', label: 'Accidents travail' },
-  { key: 'totalFdfp', label: 'FDFP (1,6%)' }, { key: 'total', label: 'Total période' },
-];
-
-// Map mode ⇄ clé de page (les 3 sous-menus "Charges sociales" partagent ce même composant)
-const CHARGES_SOCIALES_PAGE_KEY: Record<ChargesPeriodMode, string> = { month: 'cs-mensuelles', semester: 'cs-semestrielles', year: 'cs-annuelles' };
-
 function cumulateEmployerCharges(emp: Employee, months: { start: string; end: string; label: string }[], atRate: number) {
   let brutCumule = 0;
   let moisAvecDonnees = 0;
@@ -2603,49 +2051,26 @@ const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet
 // Les montants proviennent TOUJOURS de la paie réelle calculée mois par mois (mêmes présences
 // que dans le menu "Paie") — jamais d'une simple multiplication du salaire actuel.
 function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee[]; mode: ChargesPeriodMode; periodLabel: string }) {
-  const { version, bump } = useContext(DataVersionContext);
+  const [atRate, setAtRate] = useState(0.03);
   const now = new Date();
-  const nowYear = now.getFullYear(), nowMonth = now.getMonth() + 1;
-  // Presets pour les boutons rapides Mois/Semestre/Année (n'influencent l'affichage que via periodStart/periodEnd)
-  const [year, setYear] = useState(nowYear);
-  const [month, setMonth] = useState(nowMonth);
-  const [semester, setSemester] = useState<1 | 2>(nowMonth <= 6 ? 1 : 2);
-  // "Période du/au" est la source de vérité, réellement modifiable (comme dans "Paie") — les
-  // presets ci-dessus ne servent qu'à la préremplir rapidement.
-  const initialPreset = mode === 'month' ? monthRange(nowYear, nowMonth)
-    : mode === 'semester' ? { start: monthRange(nowYear, nowMonth <= 6 ? 1 : 7).start, end: monthRange(nowYear, nowMonth <= 6 ? 6 : 12).end }
-    : { start: `${nowYear}-01-01`, end: `${nowYear}-12-31` };
-  const [periodStart, setPeriodStart] = useState(initialPreset.start);
-  const [periodEnd, setPeriodEnd] = useState(initialPreset.end);
+  // Ancré sur le mois/année courants par défaut, pour rester cohérent avec le menu "Paie".
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [semester, setSemester] = useState<1 | 2>(now.getMonth() + 1 <= 6 ? 1 : 2);
 
-  function applyMonthPreset(y: number, m: number) {
-    setYear(y); setMonth(m);
-    const r = monthRange(y, m);
-    setPeriodStart(r.start); setPeriodEnd(r.end);
-  }
-  function applySemesterPreset(y: number, s: 1 | 2) {
-    setYear(y); setSemester(s);
-    setPeriodStart(monthRange(y, s === 1 ? 1 : 7).start);
-    setPeriodEnd(monthRange(y, s === 1 ? 6 : 12).end);
-  }
-  function applyYearPreset(y: number) {
-    setYear(y);
-    if (mode === 'year') { setPeriodStart(`${y}-01-01`); setPeriodEnd(`${y}-12-31`); }
-    else if (mode === 'semester') applySemesterPreset(y, semester);
-    else applyMonthPreset(y, month);
-  }
-
-  // Taux Accidents du Travail : réglage GLOBAL persisté (parametres/general), partagé avec le
-  // bulletin de paie et le Livre de paie en fin d'année — le modifier ici le modifie partout.
-  const atRatePct = parametresGeneraux.accidentTravailTauxPct;
-  const atRate = atRatePct / 100;
-
-  // Découpe la période (librement modifiable) en mois calendaires réellement agrégés
-  const months = useMemo(() => monthsInRange(periodStart, periodEnd), [periodStart, periodEnd]);
+  // Détermine la liste des mois calendaires réellement agrégés selon le mode choisi
+  const months = useMemo(() => {
+    if (mode === 'month') return [monthRange(year, month)];
+    if (mode === 'semester') {
+      const startM = semester === 1 ? 1 : 7;
+      return Array.from({ length: 6 }, (_, i) => monthRange(year, startM + i));
+    }
+    return Array.from({ length: 12 }, (_, i) => monthRange(year, i + 1)); // année complète
+  }, [mode, year, month, semester]);
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateEmployerCharges(emp, months, atRate) })),
-    [filtered, months, atRate, version]
+    [filtered, months, atRate]
   );
 
   const totalCnps = rows.reduce((a, r) => a + r.charges.totalCnps, 0);
@@ -2654,16 +2079,6 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
   const avgGlobal = rows.length ? totalGlobal / rows.length : 0;
 
   const yearOptions = [2024, 2025, 2026, 2027];
-
-  const buildRows = useCallback((): ExportRow[] => rows.map(({ emp, brutCumule, moisAvecDonnees, totalMois, charges }) => ({
-    nom: `${emp.lastName} ${emp.firstName}`, poste: emp.position, moisAvecDonnees: `${moisAvecDonnees}/${totalMois}`,
-    brutCumule, retraitePatronale: charges.retraitePatronale, prestationsFamiliales: charges.prestationsFamiliales,
-    accidentsTravail: charges.accidentsTravail, totalFdfp: charges.totalFdfp, total: charges.totalMensuel,
-  })), [rows]);
-  useEffect(() => {
-    const key = CHARGES_SOCIALES_PAGE_KEY[mode];
-    exportRegistry[key] = { title: `Charges sociales — ${periodLabel}`, tableClass: 'charges-sociales-table', columns: CHARGES_SOCIALES_EXPORT_COLUMNS, buildRows };
-  }, [mode, periodLabel, buildRows]);
 
   return (
     <div className="space-y-6">
@@ -2691,13 +2106,13 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
         </div>
       </div>
 
-      {/* Sélecteurs de période (raccourcis) + plage librement modifiable + taux AT */}
+      {/* Sélecteurs de période + taux AT */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-wrap items-center gap-3">
         <Ico name="calendar" size={18} className="text-orange-500" />
         {mode === 'month' && (
           <>
             <span className="text-xs font-bold text-slate-700">Mois :</span>
-            <select value={month} onChange={e => applyMonthPreset(year, Number(e.target.value))}
+            <select value={month} onChange={e => setMonth(Number(e.target.value))}
               className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
               {MOIS_FR.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
             </select>
@@ -2707,34 +2122,26 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
           <>
             <span className="text-xs font-bold text-slate-700">Semestre :</span>
             <div className="flex rounded-xl overflow-hidden border border-slate-200">
-              <button onClick={() => applySemesterPreset(year, 1)} className={cn('px-3 py-2 text-xs font-semibold', semester === 1 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S1 (Jan-Juin)</button>
-              <button onClick={() => applySemesterPreset(year, 2)} className={cn('px-3 py-2 text-xs font-semibold', semester === 2 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S2 (Juil-Déc)</button>
+              <button onClick={() => setSemester(1)} className={cn('px-3 py-2 text-xs font-semibold', semester === 1 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S1 (Jan-Juin)</button>
+              <button onClick={() => setSemester(2)} className={cn('px-3 py-2 text-xs font-semibold', semester === 2 ? 'bg-orange-500 text-white' : 'bg-slate-50 text-slate-600')}>S2 (Juil-Déc)</button>
             </div>
           </>
         )}
-        <span className="text-xs font-bold text-slate-700 ml-1">Année :</span>
-        <select value={year} onChange={e => applyYearPreset(Number(e.target.value))}
+        {mode !== 'month' && <span className="text-xs font-bold text-slate-700 ml-1">Année :</span>}
+        {mode === 'month' && <span className="text-xs font-bold text-slate-700">Année :</span>}
+        <select value={year} onChange={e => setYear(Number(e.target.value))}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
           {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
 
         <span className="w-px h-6 bg-slate-200 mx-1" />
-        <span className="text-[10px] text-slate-400 uppercase">Période du</span>
-        <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        <span className="text-[10px] text-slate-400 uppercase">au</span>
-        <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-
-        <span className="w-px h-6 bg-slate-200 mx-1" />
 
         <Ico name="shield" size={18} className="text-orange-500" />
         <span className="text-xs font-bold text-slate-700">Taux Accidents du travail :</span>
-        <input type="number" min={0} max={100} step={0.5} value={atRatePct}
-          onChange={e => { setAccidentTravailTauxPct(Number(e.target.value) || 0); bump(); }}
-          className="w-20 px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        <span className="text-xs text-slate-500">%</span>
-        <span className="text-[10px] text-slate-400">(réglage commun à toute l'application — bulletin, Livre de paie fin d'année inclus)</span>
+        <select value={atRate} onChange={e => setAtRate(Number(e.target.value))}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
+          {AT_RATE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
       </div>
 
       {/* Tableau détaillé par employé */}
@@ -2748,10 +2155,10 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
           </p>
         </div>
 
-        <div className="overflow-auto max-h-[70vh]">
-          <table className="w-full text-left charges-sociales-table">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
             <thead><tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase min-w-[220px]">Employé</th>
+              <th className="px-4 py-3 text-[10px] font-bold text-slate-400 uppercase">Employé</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Mois avec données</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Brut réel cumulé</th>
               <th className="px-3 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">CNPS Retraite (7,7%)</th>
@@ -2763,7 +2170,7 @@ function SocialChargesPage({ filtered, mode, periodLabel }: { filtered: Employee
             <tbody className="divide-y divide-slate-100">
               {rows.map(({ emp, brutCumule, moisAvecDonnees, totalMois, charges }) => (
                 <tr key={emp.id} className="hover:bg-orange-50/60">
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.lastName} {emp.firstName}</p><p className="text-[10px] text-slate-400">{emp.position} · {emp.professionalStatus}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><Avatar emp={emp} /><div><p className="text-xs font-semibold text-slate-700">{emp.firstName} {emp.lastName}</p><p className="text-[10px] text-slate-400">{emp.position} · {emp.professionalStatus}</p></div></div></td>
                   <td className="px-3 py-3 text-right">
                     <span className={cn('inline-block px-2 py-0.5 rounded-full text-[10px] font-bold',
                       moisAvecDonnees === totalMois ? 'bg-emerald-100 text-emerald-700' : moisAvecDonnees === 0 ? 'bg-slate-100 text-slate-400' : 'bg-amber-100 text-amber-700')}>
@@ -2870,7 +2277,7 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
     const pfBase = Math.min(s.brutSocial, CHARGES_PATRONALES.prestationFamilialeBase);
     const prestationFamiliale = Math.round(pfBase * CHARGES_PATRONALES.prestationFamilialeTaux);
     const atBase = Math.min(s.brutSocial, CHARGES_PATRONALES.accidentTravailBase);
-    const accidentTravail = Math.round(atBase * (parametresGeneraux.accidentTravailTauxPct / 100));
+    const accidentTravail = Math.round(atBase * CHARGES_PATRONALES.accidentTravailTaux);
     const cnpsPatronal = computeCNPSPatronal(s.brutSocial);
     const totalCnpsPatronal = prestationFamiliale + accidentTravail + cnpsPatronal;
     const totalGeneral = totalImpotPatronal + totalCnpsPatronal;
@@ -2884,55 +2291,17 @@ function cumulateAnnualPayroll(emp: Employee, months: { start: string; end: stri
   return { ...acc, moisAvecDonnees, totalMois: months.length };
 }
 
-const LIVRE_FIN_ANNEE_EXPORT_COLUMNS: ExportColumn[] = [
-  { key: 'n', label: 'N°' }, { key: 'nom', label: 'Nom' }, { key: 'prenoms', label: 'Prénoms' },
-  { key: 'salaireBase', label: 'Salaire base (cumul)' }, { key: 'sursalaire', label: 'Sursalaire (cumul)' },
-  { key: 'heureSuppl', label: 'Heure suppl. (cumul)' }, { key: 'primeAnciennete', label: 'Prime ancienneté (cumul)' },
-  { key: 'primeFonction', label: 'Prime fonction (cumul)' }, { key: 'totalBrut', label: 'Total brut annuel' },
-  { key: 'brutImposable', label: 'Brut imposable' }, { key: 'brutSocial', label: 'Brut social' },
-  { key: 'impotsBrut', label: 'Impôts brut' }, { key: 'ricf', label: 'RICF' }, { key: 'its', label: 'ITS salariés' },
-  { key: 'cnps', label: 'CNPS salariés' }, { key: 'cnam', label: 'CNAM' }, { key: 'pret', label: 'Prêts' },
-  { key: 'transport', label: 'Indem. transport' }, { key: 'salaireNet', label: 'Salaire net annuel' },
-  { key: 'isp', label: 'ISP (1,2%)' }, { key: 'fdfpTA', label: 'FDFP TA (0,4%)' }, { key: 'fdfpTCF', label: 'FDFP TCF (1,2%)' },
-  { key: 'totalImpot', label: 'Total impôt' }, { key: 'prestationFamiliale', label: 'Prest. familiales' },
-  { key: 'accidentTravail', label: 'Accident travail' }, { key: 'retraitePatronale', label: 'Retraite patronale' },
-  { key: 'totalCnpsPatronal', label: 'Total CNPS patronal' }, { key: 'totalGeneral', label: 'TOTAL GÉNÉRAL' },
-];
-
-function buildLivreFinAnneeExportRows(rows: { emp: Employee; baseSalary: number; sursalaire: number; overtimePay: number; ancienneteAmount: number; primeFonction: number; totalBrut: number; brutImposable: number; brutSocial: number; impotsBrut: number; ricf: number; its: number; cnps: number; cnam: number; pret: number; transport: number; netToPay: number; isp: number; fdfpTA: number; fdfpTCF: number; totalImpotPatronal: number; prestationFamiliale: number; accidentTravail: number; cnpsPatronal: number; totalCnpsPatronal: number; totalGeneral: number }[]): ExportRow[] {
-  return rows.map((r, i) => ({
-    n: i + 1, nom: r.emp.lastName, prenoms: r.emp.firstName, salaireBase: r.baseSalary, sursalaire: r.sursalaire,
-    heureSuppl: r.overtimePay, primeAnciennete: r.ancienneteAmount, primeFonction: r.primeFonction, totalBrut: r.totalBrut,
-    brutImposable: r.brutImposable, brutSocial: r.brutSocial, impotsBrut: r.impotsBrut, ricf: r.ricf, its: r.its,
-    cnps: r.cnps, cnam: r.cnam, pret: r.pret, transport: r.transport, salaireNet: r.netToPay, isp: r.isp,
-    fdfpTA: r.fdfpTA, fdfpTCF: r.fdfpTCF, totalImpot: r.totalImpotPatronal, prestationFamiliale: r.prestationFamiliale,
-    accidentTravail: r.accidentTravail, retraitePatronale: r.cnpsPatronal, totalCnpsPatronal: r.totalCnpsPatronal, totalGeneral: r.totalGeneral,
-  }));
-}
-
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
-  const { version } = useContext(DataVersionContext);
-  const currentYear = new Date().getFullYear();
-  const [year, setYear] = useState(currentYear);
-  // "Période du/au" est la source de vérité (vraiment modifiable) ; le sélecteur d'année n'est
-  // qu'un raccourci qui la préremplit sur Janvier → Décembre de l'année choisie.
-  const [periodStart, setPeriodStart] = useState(`${currentYear}-01-01`);
-  const [periodEnd, setPeriodEnd] = useState(`${currentYear}-12-31`);
+  const [year, setYear] = useState(new Date().getFullYear());
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const yearOptions = [2024, 2025, 2026, 2027, 2028];
 
-  function applyYearShortcut(y: number) {
-    setYear(y);
-    setPeriodStart(`${y}-01-01`);
-    setPeriodEnd(`${y}-12-31`);
-  }
-
-  const months = useMemo(() => monthsInRange(periodStart, periodEnd), [periodStart, periodEnd]);
-  const decEnd = months[months.length - 1]?.end || periodEnd;
+  const months = useMemo(() => Array.from({ length: 12 }, (_, i) => monthRange(year, i + 1)), [year]);
+  const decEnd = months[11].end;
 
   const rows = useMemo(
     () => filtered.map(emp => ({ emp, ...cumulateAnnualPayroll(emp, months) })),
-    [filtered, months, version]
+    [filtered, months]
   );
 
   const sum = (fn: (r: typeof rows[number]) => number) => rows.reduce((a, r) => a + fn(r), 0);
@@ -2948,29 +2317,17 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
   };
   const coutTotalEmployeur = T.netToPay + T.its + T.cnps + T.cnam + T.totalGeneral; // net + retenues salariales reversées + charges patronales
 
-  const buildRows = useCallback(() => buildLivreFinAnneeExportRows(rows), [rows]);
-  useEffect(() => {
-    exportRegistry['livre-fin-annee'] = { title: "Livre de paie - Fin d'année", tableClass: 'livre-fin-annee-table', columns: LIVRE_FIN_ANNEE_EXPORT_COLUMNS, buildRows };
-  }, [buildRows]);
-
   return (
     <div className="space-y-6">
-      {/* Sélecteur d'année (raccourci) + période librement modifiable */}
+      {/* Sélecteur d'année */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-wrap items-center gap-3">
         <Ico name="receipt" size={18} className="text-orange-500" />
         <span className="text-xs font-bold text-slate-700">Exercice :</span>
-        <select value={year} onChange={e => applyYearShortcut(Number(e.target.value))}
+        <select value={year} onChange={e => setYear(Number(e.target.value))}
           className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
           {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
-        <span className="w-px h-6 bg-slate-200 mx-1" />
-        <span className="text-[10px] text-slate-400 uppercase">Période du</span>
-        <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        <span className="text-[10px] text-slate-400 uppercase">au</span>
-        <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
-        <span className="text-[10px] text-slate-400 ml-2">cliquez sur une ligne pour voir le bulletin de décembre</span>
+        <span className="text-[10px] text-slate-400 ml-2">Cumul Janvier → Décembre {year} · cliquez sur une ligne pour voir le bulletin de décembre</span>
       </div>
 
       {/* Cartes statistiques globales */}
@@ -3002,17 +2359,17 @@ function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
         <div className="px-5 py-4 bg-orange-50 border-b border-orange-100">
           <h3 className="text-sm font-bold text-orange-800">Livre de paie en fin d'année — Permanents — Cumul {year}</h3>
           <p className="text-[11px] text-orange-600 mt-0.5">
-            Reprend le "Livre de paie" mois par mois (Janvier → Décembre) et y ajoute les charges patronales : ISP 1,2% · FDFP (Taxe d'apprentissage 0,4% + Taxe FPC 1,2%) · Prestations familiales 5,75% &amp; accident du travail {parametresGeneraux.accidentTravailTauxPct}% (plaf. {formatFCFA(CHARGES_PATRONALES.prestationFamilialeBase)}, réglable dans "Charges sociales") · Caisse de retraite patronale 7,7% (plaf. {formatFCFA(CNPS_PLAFOND)})
+            Reprend le "Livre de paie" mois par mois (Janvier → Décembre) et y ajoute les charges patronales : ISP 1,2% · FDFP (Taxe d'apprentissage 0,4% + Taxe FPC 1,2%) · Prestations familiales &amp; accident du travail 5,75%/2% (plaf. {formatFCFA(CHARGES_PATRONALES.prestationFamilialeBase)}) · Caisse de retraite patronale 7,7% (plaf. {formatFCFA(CNPS_PLAFOND)})
           </p>
         </div>
 
-        <div className="overflow-auto max-h-[70vh]">
-          <table className="w-full text-left livre-fin-annee-table">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70">
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[32px]">N°</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Nom</th>
-                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap min-w-[100px]">Prénoms</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">N°</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Nom</th>
+                <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase whitespace-nowrap">Prénoms</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Salaire base (cumul)</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Sursalaire (cumul)</th>
                 <th className="px-2.5 py-2 text-[9px] font-bold text-slate-400 uppercase text-right whitespace-nowrap">Heure suppl. (cumul)</th>
@@ -3202,7 +2559,6 @@ async function loadAllFromFirestore() {
     loadCollectionInto('payrollOverrides', payrollOverrides, payrollOverrides.slice()),
     loadCollectionInto('sites', sites, sites.slice()),
     loadUsersCollection(registeredUsers),
-    loadParametresGeneraux(),
   ]);
 }
 
@@ -3313,21 +2669,11 @@ function AppShell() {
     saveUiState({ page, currentUser });
   }, [page, currentUser]);
 
-  // Si la page est rechargée alors que l'utilisateur était déjà connecté
-  // (session restaurée depuis le stockage local), on ouvre une nouvelle
-  // session RISE Presence pour refléter cette reprise de connexion.
-  useEffect(() => {
-    if (currentUser) void startRiseSession({ username: currentUser.username, role: currentUser.role });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const handleLogin = (user: AuthUser) => {
     setCurrentUser(user);
-    void startRiseSession({ username: user.username, role: user.role });
   };
 
   const handleLogout = () => {
-    void endRiseSession();
     setCurrentUser(null);
     setSearch('');
     setPage('dashboard');
@@ -3339,7 +2685,6 @@ function AppShell() {
     sites: 'Gestion des sites',
     employees: 'Gestion des employés',
     paye: 'Paie & Salaires',
-    reconstitution: 'Reconstitution du salaire de base',
     'livre-fin-annee': "Livre de paie — Fin d'année",
     'cs-mensuelles': 'Charges sociales mensuelles',
     'cs-semestrielles': 'Charges sociales semestrielles',
@@ -3355,42 +2700,14 @@ function AppShell() {
     return employees.filter(e => `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email}`.toLowerCase().includes(q));
   }, [search, dataVersion]);
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [importBusy, setImportBusy] = useState(false);
-  const [exportModalPage, setExportModalPage] = useState<string | null>(null);
-
   const onAction = (action: string) => {
     switch (action) {
       case 'save': alert('Toutes les données sont déjà enregistrées automatiquement et en temps réel sur le serveur — aucune action manuelle nécessaire.'); break;
-      case 'print':
-        if (exportRegistry[page]) { setExportModalPage(page); break; }
-        window.print();
-        break;
-      case 'import':
-        if (page !== 'employees') { alert('L\'import concerne la liste des employés — rendez-vous sur le menu "Employés".'); break; }
-        fileInputRef.current?.click();
-        break;
-      case 'export':
-        if (!exportRegistry[page]) { alert('L\'export n\'est pas encore disponible sur cette page.'); break; }
-        setExportModalPage(page);
-        break;
+      case 'print': window.print(); break;
+      case 'import': alert('Fonctionnalité importer'); break;
+      case 'export': alert('Export en cours...'); break;
     }
   };
-
-  async function handleImportFile(file: File) {
-    setImportBusy(true);
-    try {
-      const { created, updated, errors } = await importEmployeesCSV(file);
-      bump();
-      let msg = `Import terminé : ${created} employé(s) créé(s), ${updated} mis à jour.`;
-      if (errors.length) msg += `\n\n${errors.length} ligne(s) ignorée(s) :\n` + errors.slice(0, 10).join('\n');
-      alert(msg);
-    } catch (err) {
-      alert('Erreur lors de l\'import : ' + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setImportBusy(false);
-    }
-  }
 
   /* ── Page de connexion ── */
   if (!currentUser) {
@@ -3410,26 +2727,6 @@ function AppShell() {
         onLogout={handleLogout}
       />
       <main className="flex-1 lg:ml-60 min-h-screen">
-        <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{ display: 'none' }}
-          onChange={e => {
-            const file = e.target.files?.[0];
-            if (file) void handleImportFile(file);
-            e.target.value = ''; // permet de réimporter le même fichier plus tard si besoin
-          }} />
-        {importBusy && (
-          <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
-            <div className="bg-white rounded-2xl px-6 py-4 shadow-xl text-sm font-semibold text-slate-700">Import en cours…</div>
-          </div>
-        )}
-        {exportModalPage && exportRegistry[exportModalPage] && (
-          <ExportModal
-            title={exportRegistry[exportModalPage].title}
-            columns={exportRegistry[exportModalPage].columns}
-            buildRows={exportRegistry[exportModalPage].buildRows}
-            onClose={() => setExportModalPage(null)}
-            onPrint={(hidden) => applyPrintColumnFilter(exportRegistry[exportModalPage!].tableClass, exportRegistry[exportModalPage!].columns.map(c => c.key), hidden)}
-          />
-        )}
         <TopBar
           title={titles[page]}
           setMobileOpen={setMobileOpen}
@@ -3448,7 +2745,6 @@ function AppShell() {
           <div style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
           <div style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'reconstitution' ? 'block' : 'none' }}><PageErrorBoundary pageName="Reconstitution"><ReconstitutionPage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
           <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
           <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>

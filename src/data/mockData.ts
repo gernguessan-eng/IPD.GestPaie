@@ -24,11 +24,7 @@ export type SalaryComponents = {
   responsibility: number;         // Prime de responsabilité — composante de la "Prime de fonction" imposable (J)
   performance: number;            // Prime de rendement / performance (extension imposable)
   boisson: number;                // Prime de boisson (extension imposable)
-  other: number;                  // Autres primes (extension imposable) — TOTAL auto-synchronisé = otherAmount1 + otherAmount2 (compat. formules existantes)
-  otherLabel1?: string;           // Nom personnalisé de la 1ère "Autre prime"
-  otherAmount1: number;           // Montant de la 1ère "Autre prime"
-  otherLabel2?: string;           // Nom personnalisé de la 2e "Autre prime"
-  otherAmount2: number;           // Montant de la 2e "Autre prime"
+  other: number;                  // Autres primes (extension imposable)
   primeFonctionNonImposable: number; // Prime de fonction NON imposable (I) — issue de l'onglet "MODE D'EMPLOI" (AJ)
   indemniteResponsabiliteNonTaxable: number; // Indemnité de responsabilité NON taxable : exclue du salaire brut taxable
                                               // (IGR) ET des impôts sur salaires, MAIS incluse dans la base CNPS
@@ -81,9 +77,9 @@ export type Employee = {
 // Helper pour calculer le salaire total à partir des rubriques
 // (= "TOTAL SALAIRE BRUT" (K) de l'onglet LIVRE DE PAIE : inclut la prime non imposable et le transport)
 export const computeSalary = (c: SalaryComponents): number =>
-  (c.baseSalary || 0) + (c.sursalaire || 0) + (c.seniority || 0) + (c.housing || 0) + (c.transport || 0) +
-  (c.representation || 0) + (c.responsibility || 0) + (c.performance || 0) + (c.boisson || 0) + (c.other || 0) + (c.primeFonctionNonImposable || 0) +
-  (c.indemniteResponsabiliteNonTaxable || 0);
+  c.baseSalary + c.sursalaire + c.seniority + c.housing + c.transport +
+  c.representation + c.responsibility + c.performance + c.boisson + c.other + c.primeFonctionNonImposable +
+  c.indemniteResponsabiliteNonTaxable;
 
 // ══════════════════════════════════════════════════════════════
 // MOTEUR FISCAL & SOCIAL — Côte d'Ivoire
@@ -243,7 +239,7 @@ export const sites: Site[] = [
 
 // Génère une répartition des rubriques de paie réaliste (Côte d'Ivoire)
 function mkComponents(base: number, sursalaire: number, seniority: number, housing: number, transport: number, representation: number, resp: number, perf: number, boisson: number, other: number, primeFonctionNonImposable = 0, indemniteResponsabiliteNonTaxable = 0): SalaryComponents {
-  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, otherAmount1: other, otherAmount2: 0, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable };
+  return { baseSalary: base, sursalaire, seniority, housing, transport, representation, responsibility: resp, performance: perf, boisson, other, primeFonctionNonImposable, indemniteResponsabiliteNonTaxable };
 }
 
 // ── EMPLOYÉS ────────────────────────────────────────────────

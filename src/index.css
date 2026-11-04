@@ -62,13 +62,6 @@
   .print-area .print-body {
     padding: 0 !important;
   }
-  /* Resserre les lignes du tableau du bulletin à l'impression, pour que le bulletin
-     tienne sur une seule page (y compris en paysage) même avec de nombreuses rubriques. */
-  .print-area table th,
-  .print-area table td {
-    padding-top: 2px !important;
-    padding-bottom: 2px !important;
-  }
   /* Neutralise le positionnement/centrage/padding de l'enveloppe de la fenêtre modale,
      pour que .print-area (position: absolute) se positionne par rapport à la page et non
      par rapport à une boîte centrée en écran. */
@@ -80,5 +73,52 @@
   * {
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
+  }
+}
+
+/* En format paysage, la page est moins haute : le bulletin (dimensionné confortablement
+   pour le portrait, où il tient déjà sur une page avec de la marge) peut légèrement
+   déborder sur une 2e page quasi vide. On resserre donc les espacements, mais UNIQUEMENT
+   en paysage — en portrait le bulletin garde ses espacements normaux, identiques à ce qui
+   s'affiche à l'écran, pour bien remplir la page au lieu de laisser un grand vide en bas. */
+@media print and (orientation: landscape) {
+  .print-area .bulletin-header,
+  .print-area .bulletin-net {
+    padding: 0.5rem !important;
+  }
+  .print-area .bulletin-header img {
+    height: 2.5rem !important;
+    width: 2.5rem !important;
+  }
+  .print-area .bulletin-badge {
+    padding-top: 0.25rem !important;
+    padding-bottom: 0.25rem !important;
+  }
+  .print-area .bulletin-info {
+    padding: 0.5rem !important;
+    row-gap: 0 !important;
+  }
+  .print-area table th,
+  .print-area table td {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+  }
+  .print-area .bulletin-charges {
+    padding: 0.375rem !important;
+  }
+  .print-area .bulletin-charges > p {
+    margin-bottom: 0.125rem !important;
+  }
+  .print-area .bulletin-charges > div {
+    row-gap: 0 !important;
+  }
+  .print-area .bulletin-sig {
+    padding: 0.5rem !important;
+  }
+  .print-area .bulletin-sig-line {
+    height: 1.5rem !important;
+  }
+  .print-area .bulletin-footer {
+    margin-top: 0.25rem !important;
   }
 }

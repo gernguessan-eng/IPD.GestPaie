@@ -1548,9 +1548,9 @@ ${transportRow ? line(transportRow) : ''}
         <div className="p-6 print:p-0 print-body">
           <div className={cn('border-2 rounded-lg overflow-hidden', isCadre ? 'border-indigo-300' : 'border-slate-300')}>
             {/* Bandeau titre + logo */}
-            <div className={cn('flex items-start justify-between p-4 print:p-2 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
+            <div className={cn('bulletin-header flex items-start justify-between p-4 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
               <div className="flex items-start gap-3">
-                <div className="h-14 w-14 print:h-10 print:w-10 rounded-lg border border-slate-300 bg-white flex items-center justify-center overflow-hidden shrink-0">
+                <div className="h-14 w-14 rounded-lg border border-slate-300 bg-white flex items-center justify-center overflow-hidden shrink-0">
                   <img src={logo} alt="Logo entreprise" className="h-full w-full object-contain" />
                 </div>
                 <div>
@@ -1560,7 +1560,7 @@ ${transportRow ? line(transportRow) : ''}
                   <p className="text-[10px] text-slate-500">CNPS employeur : {site?.cnpsEmployeur || '—'} · N° Contribuable : {site?.numeroContribuable || '—'}</p>
                 </div>
               </div>
-              <div className={cn('text-center px-4 py-2 print:py-1 rounded-lg', isCadre ? 'bg-indigo-100' : 'bg-slate-200')}>
+              <div className={cn('bulletin-badge text-center px-4 py-2 rounded-lg', isCadre ? 'bg-indigo-100' : 'bg-slate-200')}>
                 <p className="text-[10px] font-bold text-slate-700 uppercase">Bulletin de paie</p>
                 <p className="text-[10px] text-slate-600">Du {fmt(periodStart)}</p>
                 <p className="text-[10px] text-slate-600">Au {fmt(periodEnd)}</p>
@@ -1569,7 +1569,7 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Infos salarié (fiche complète, comme l'onglet ALI) */}
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1 p-4 print:p-2 print:gap-y-0 border-b border-slate-200 text-[11px]">
+            <div className="bulletin-info grid grid-cols-2 gap-x-6 gap-y-1 p-4 border-b border-slate-200 text-[11px]">
               <div className="flex justify-between"><span className="text-slate-500">Matricule :</span><span className="font-semibold text-slate-700">{emp.matricule || '—'}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">N° CNPS :</span><span className="font-semibold text-slate-700">{emp.cnpsNumber || '—'}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Nom & Prénom :</span><span className="font-semibold text-slate-700">{emp.lastName} {emp.firstName}</span></div>
@@ -1632,7 +1632,7 @@ ${transportRow ? line(transportRow) : ''}
             </table>
 
             {/* Net à payer */}
-            <div className={cn('flex items-center justify-between p-4 print:p-2 border-t-2', isCadre ? 'border-indigo-300 bg-indigo-50' : 'border-slate-300 bg-slate-100')}>
+            <div className={cn('bulletin-net flex items-center justify-between p-4 border-t-2', isCadre ? 'border-indigo-300 bg-indigo-50' : 'border-slate-300 bg-slate-100')}>
               <div>
                 <p className="text-[10px] text-slate-500 uppercase">Total brut + transport</p>
                 <p className="text-xs font-bold text-slate-700">{(totalBrut + transportNonImposable).toLocaleString('fr-FR')} FCFA</p>
@@ -1648,9 +1648,9 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Charges patronales indicatives — part employeur, non déduite du salarié */}
-            <div className="border-t border-slate-200 p-3 print:p-1.5 bg-slate-50/60">
-              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 print:mb-0.5">Charges patronales (indicatif — part employeur)</p>
-              <div className="grid grid-cols-3 gap-x-4 gap-y-1 print:gap-y-0 text-[10px] text-slate-600">
+            <div className="bulletin-charges border-t border-slate-200 p-3 bg-slate-50/60">
+              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Charges patronales (indicatif — part employeur)</p>
+              <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-[10px] text-slate-600">
                 <div className="flex justify-between"><span>CNPS retraite patronale (7,7%)</span><span className="font-semibold">{formatFCFA(cnpsPatronal)}</span></div>
                 <div className="flex justify-between"><span>Prestation familiale (5,75%)</span><span className="font-semibold">{formatFCFA(prestationFamiliale)}</span></div>
                 <div className="flex justify-between"><span>Accident du travail (2%)</span><span className="font-semibold">{formatFCFA(accidentTravail)}</span></div>
@@ -1661,19 +1661,19 @@ ${transportRow ? line(transportRow) : ''}
             </div>
 
             {/* Signatures */}
-            <div className="grid grid-cols-2 gap-6 p-5 print:p-2 border-t border-slate-200">
+            <div className="bulletin-sig grid grid-cols-2 gap-6 p-5 border-t border-slate-200">
               <div className="text-center">
-                <div className="h-12 print:h-6"></div>
+                <div className="bulletin-sig-line h-12"></div>
                 <p className="text-[9px] text-slate-400 border-t border-slate-300 pt-1">Signature de l'employé</p>
               </div>
               <div className="text-center">
-                <div className="h-12 print:h-6"></div>
+                <div className="bulletin-sig-line h-12"></div>
                 <p className="text-[9px] text-slate-400 border-t border-slate-300 pt-1">Cachet et signature du directeur</p>
               </div>
             </div>
           </div>
 
-          <p className="text-[9px] text-slate-400 text-center mt-3 print:mt-1">
+          <p className="bulletin-footer text-[9px] text-slate-400 text-center mt-3">
             Pour vous aider à faire valoir vos droits, conservez ce bulletin de paie sans limitation de durée. · Net à payer identique au tableau récapitulatif : {formatFCFA(netToPay)}
           </p>
         </div>

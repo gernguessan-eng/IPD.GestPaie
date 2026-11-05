@@ -3,7 +3,7 @@
  * (ou des tableaux construits à partir des données) et les convertit en .xlsx ou .csv.
  * Utilisé par le bouton « Exporter » de la barre du haut.
  */
-import { buildXlsxBlob, type XCell } from './xlsx';
+import { buildXlsxBlob, type XCell, type XlsxOptions } from './xlsx';
 
 export type ExportCell = string | number;
 export interface ExportTable {
@@ -98,7 +98,8 @@ export function extractTables(root: HTMLElement): ExportTable[] {
 
 /* ─── Conversion en .xlsx ─────────────────────────────────── */
 
-export function tablesToXlsxBlob(pageTitle: string, tables: ExportTable[]): Blob {
+/** Feuille Excel (définition) construite à partir de tableaux — réutilisable dans un classeur multi-feuilles. */
+export function tablesToSheet(pageTitle: string, tables: ExportTable[], sheetName = pageTitle): XlsxOptions {
   const colCount = Math.max(1, ...tables.map(t => t.headers.length));
   const widths = new Array<number>(colCount).fill(8);
   const bump = (i: number, text: string, cap = 36) => {
@@ -124,13 +125,17 @@ export function tablesToXlsxBlob(pageTitle: string, tables: ExportTable[]): Blob
     if (ti < tables.length - 1) rows.push([{ span: colCount }]);
   });
 
-  return buildXlsxBlob({
-    sheetName: pageTitle,
+  return {
+    sheetName,
     colWidths: widths,
     rows,
     orientation: colCount > 6 ? 'landscape' : 'portrait',
     fitToHeight: 0, // largeur ajustée sur 1 page ; autant de pages que nécessaire en hauteur
-  });
+  };
+}
+
+export function tablesToXlsxBlob(pageTitle: string, tables: ExportTable[]): Blob {
+  return buildXlsxBlob(tablesToSheet(pageTitle, tables));
 }
 
 /* ─── Conversion en .csv ──────────────────────────────────── */

@@ -262,18 +262,43 @@ function zipStore(files: { name: string; data: Uint8Array }[]): Uint8Array {
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-/** Construit le fichier .xlsx et le renvoie sous forme de Blob prêt à être téléchargé. */
+/** Construit un classeur .xlsx d'une seule feuille (Blob prêt à être téléchargé). */
 export function buildXlsxBlob(opts: XlsxOptions): Blob {
-  const sheetName = safeSheetName(opts.sheetName);
+  return buildWorkbookBlob([opts]);
+}
+
+// Noms de feuilles uniques (Excel ignore la casse) et limités à 31 caractères : en cas de
+// doublon (deux employés homonymes), on ajoute " (2)", " (3)"… en gardant la longueur valide.
+function uniqueSheetNames(names: string[]): string[] {
+  const used = new Set<string>();
+  return names.map(raw => {
+    const base = safeSheetName(raw);
+    let name = base;
+    for (let i = 2; used.has(name.toLowerCase()); i++) {
+      const suffix = ` (${i})`;
+      name = base.slice(0, 31 - suffix.length) + suffix;
+    }
+    used.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/** Construit un classeur .xlsx de plusieurs feuilles, dans l'ordre donné. */
+export function buildWorkbookBlob(sheets: XlsxOptions[]): Blob {
+  const names = uniqueSheetNames(sheets.map(s => s.sheetName));
   const enc = new TextEncoder();
   const xml = (s: string) => enc.encode(s);
+  const n = sheets.length;
 
+  const sheetOverrides = sheets
+    .map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`)
+    .join('\n');
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+${sheetOverrides}
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 </Types>`;
 
@@ -282,16 +307,20 @@ export function buildXlsxBlob(opts: XlsxOptions): Blob {
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>`;
 
+  const sheetTags = names.map((nm, i) => `<sheet name="${xmlEsc(nm)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('');
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<bookViews><workbookView/></bookViews>
-<sheets><sheet name="${xmlEsc(sheetName)}" sheetId="1" r:id="rId1"/></sheets>
+<bookViews><workbookView activeTab="0"/></bookViews>
+<sheets>${sheetTags}</sheets>
 </workbook>`;
 
+  const sheetRels = sheets
+    .map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`)
+    .join('\n');
   const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+${sheetRels}
+<Relationship Id="rId${n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`;
 
   const zip = zipStore([
@@ -299,7 +328,7 @@ export function buildXlsxBlob(opts: XlsxOptions): Blob {
     { name: '_rels/.rels', data: xml(rootRels) },
     { name: 'xl/workbook.xml', data: xml(workbook) },
     { name: 'xl/_rels/workbook.xml.rels', data: xml(workbookRels) },
-    { name: 'xl/worksheets/sheet1.xml', data: xml(buildSheetXml(opts)) },
+    ...sheets.map((sh, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xml(buildSheetXml(sh)) })),
     { name: 'xl/styles.xml', data: xml(STYLES_XML) },
   ]);
 

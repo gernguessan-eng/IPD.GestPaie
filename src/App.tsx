@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
-import { buildXlsxBlob, type XCell } from './lib/xlsx';
-import { extractTables, tablesToXlsxBlob, tablesToCsv, type ExportTable } from './lib/exportTable';
+import { buildXlsxBlob, buildWorkbookBlob, type XCell, type XlsxOptions } from './lib/xlsx';
+import { extractTables, tablesToSheet, tablesToXlsxBlob, tablesToCsv, type ExportTable } from './lib/exportTable';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -1392,12 +1392,14 @@ function PaySlipRow({ code, label, base, taux, gain, retenue }: {
 // Excel I.P & D (bandeau entreprise/CNPS, identité complète du salarié, tableau des
 // rubriques avec codes, cotisations salariales détaillées, retenues fixes, indemnité de
 // transport non imposable, charges patronales indicatives, signatures).
-function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRow; periodStart: string; periodEnd: string; onClose: () => void; }) {
-  const { emp, ot, netToPay, ancienneteAmount, ancienneteRatePct, social, joursPayes, joursNonPayes, baseSalaryProrated, sursalaireProrated, hasData } = row;
-  const c = getComponents(emp);
-  const isCadre = emp.professionalStatus === 'Cadre';
-  const [exportOpen, setExportOpen] = useState(false);
+type SlipLine = { code?: string; label: string; base?: number; taux?: string; gain?: number; retenue?: number };
 
+// Toutes les valeurs dérivées d'un bulletin (rubriques de gains/retenues, charges patronales,
+// site…). Source unique, partagée par l'affichage du bulletin, son export Excel/CSV et l'export
+// « tous les bulletins » de la page Paie — afin qu'aucun écart ne soit possible entre eux.
+function computeSlipData(row: PayrollRow) {
+  const { emp, ot, ancienneteAmount, ancienneteRatePct, social, joursPayes, baseSalaryProrated, sursalaireProrated } = row;
+  const c = getComponents(emp);
   const { brutImposable, totalBrut, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer } = social;
   const primeFonctionImposable = c.representation + c.responsibility;
 
@@ -1417,7 +1419,6 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   // Lignes "gains" et "retenues" du bulletin — construites une seule fois et réutilisées
   // à la fois pour l'affichage (tableau JSX ci-dessous) et pour les exports Excel/CSV, afin
   // d'éviter toute divergence entre ce qui s'affiche et ce qui s'exporte.
-  type SlipLine = { code?: string; label: string; base?: number; taux?: string; gain?: number; retenue?: number };
   const gainRows: SlipLine[] = [
     { code: '10', label: 'SALAIRE', base: c.baseSalary, taux: `${joursPayes} j`, gain: baseSalaryProrated },
     ...(c.sursalaire > 0 ? [{ code: '11', label: 'SURSALAIRE', base: c.sursalaire, taux: `${joursPayes} j`, gain: sursalaireProrated }] : []),
@@ -1448,6 +1449,91 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
     ? { code: '655', label: 'INDEMNITÉ DE TRANSPORT (non imposable)', gain: transportNonImposable }
     : null;
 
+  return {
+    c, brutImposable, totalBrut, parts, impotsBrut, ricf, its, cnps, cnam, pret, acompte, assurance, totalRetenues, transportNonImposable, netAPayer,
+    primeFonctionImposable, cnpsPatronal, prestationFamiliale, accidentTravail, isLocal, taxeApprentissage, taxeFPC, site, gainRows, retenueRows, transportRow,
+  };
+}
+
+// Feuille Excel d'UN bulletin de paie (A4 portrait, ajustée sur une seule page).
+function payslipSheet(row: PayrollRow, periodStart: string, periodEnd: string): XlsxOptions {
+  const { emp } = row;
+  const {
+    parts, totalBrut, totalRetenues, netAPayer, cnpsPatronal, prestationFamiliale, accidentTravail, isLocal, taxeApprentissage, taxeFPC,
+    site, gainRows, retenueRows, transportRow,
+  } = computeSlipData(row);
+  const rows: XCell[][] = [];
+  const slipLine = (l: SlipLine): XCell[] => [
+    { v: l.code || '', s: 'textC' },
+    { v: l.label, s: 'text' },
+    { v: l.base != null ? l.base : '', s: 'num' },
+    { v: l.taux || '', s: 'textC' },
+    { v: l.gain ? l.gain : '', s: 'num' },
+    { v: l.retenue ? l.retenue : '', s: 'num' },
+  ];
+  const blank = (): XCell[] => [{ span: 6 }];
+
+  rows.push([{ v: site?.name || '', s: 'title', span: 6 }]);
+  rows.push([{ v: `${site?.address || ''}, ${site?.city || ''}`, span: 6 }]);
+  rows.push([{ v: `CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`, span: 6 }]);
+  rows.push(blank());
+  rows.push([{ v: `BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}`, s: 'title', span: 6 }]);
+  rows.push(blank());
+  rows.push([
+    { v: 'Matricule', s: 'label' }, { v: emp.matricule || '—', s: 'text' },
+    { v: 'N° CNPS', s: 'label' }, { v: emp.cnpsNumber || '—', s: 'text' },
+    { v: 'Nom & Prénom', s: 'label' }, { v: `${emp.lastName} ${emp.firstName}`, s: 'text' },
+  ]);
+  rows.push([
+    { v: 'Fonction', s: 'label' }, { v: emp.position, s: 'text' },
+    { v: 'Catégorie', s: 'label' }, { v: emp.category || '—', s: 'text' },
+    { v: "Date d'embauche", s: 'label' }, { v: fmt(emp.startDate), s: 'text' },
+  ]);
+  rows.push([
+    { v: 'Situation familiale', s: 'label' }, { v: emp.familySituation || '—', s: 'text' },
+    { v: 'Enfants', s: 'label' }, { v: String(emp.numberOfChildren ?? 0), s: 'text' },
+    { v: 'Parts', s: 'label' }, { v: String(parts), s: 'text' },
+  ]);
+  rows.push(blank());
+  rows.push(['Code', 'Rubrique', 'Base', 'Taux/Nb', 'Gains', 'Retenue'].map(v => ({ v, s: 'header' as const })));
+  gainRows.forEach(l => rows.push(slipLine(l)));
+  rows.push([{ v: 'TOTAL BRUT', s: 'totLabel', span: 4 }, { v: totalBrut, s: 'totNum' }, { s: 'totLabel' }]);
+  retenueRows.forEach(l => rows.push(slipLine(l)));
+  rows.push([{ v: 'TOTAL DES RETENUES', s: 'totLabel', span: 4 }, { s: 'totLabel' }, { v: totalRetenues, s: 'totNum' }]);
+  if (transportRow) rows.push(slipLine(transportRow));
+  rows.push(blank());
+  rows.push([{ v: 'NET À PAYER', s: 'totLabel', span: 4 }, { v: netAPayer, s: 'net', span: 2 }]);
+  rows.push(blank());
+  rows.push([{ v: 'Charges patronales (indicatif)', s: 'title', span: 6 }]);
+  ([
+    ['CNPS retraite patronale (7,7%)', cnpsPatronal],
+    ['Prestation familiale (5,75%)', prestationFamiliale],
+    ['Accident du travail (2%)', accidentTravail],
+    ['IS local (1,2%)', isLocal],
+    ["Taxe d'apprentissage (0,4%)", taxeApprentissage],
+    ['Taxe FPC (1,2%)', taxeFPC],
+  ] as [string, number][]).forEach(([label, amount]) =>
+    rows.push([{ v: label, s: 'text', span: 4 }, { v: amount, s: 'num', span: 2 }])
+  );
+
+  return {
+    sheetName: `${emp.lastName} ${emp.firstName}`.trim() || 'Bulletin',
+    colWidths: [18, 42, 14, 14, 16, 24],
+    rows,
+    orientation: 'portrait',
+  };
+}
+
+function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRow; periodStart: string; periodEnd: string; onClose: () => void; }) {
+  const { emp, netToPay, joursPayes, joursNonPayes, hasData } = row;
+  const isCadre = emp.professionalStatus === 'Cadre';
+  const [exportOpen, setExportOpen] = useState(false);
+
+  const {
+    totalBrut, parts, totalRetenues, transportNonImposable, netAPayer,
+    cnpsPatronal, prestationFamiliale, accidentTravail, isLocal, taxeApprentissage, taxeFPC, site, gainRows, retenueRows, transportRow,
+  } = computeSlipData(row);
+
   // Nom de fichier directement lisible : Nom_Prénom_du_<période>_au_<période>
   const slipFileBase = sanitizeFilenamePart(
     `${emp.lastName || 'Nom'}_${emp.firstName || 'Prenom'}_du_${periodStart}_au_${periodEnd}`
@@ -1457,67 +1543,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   // Mise en page d'impression « ajuster à 1 page » (A4 portrait) : le bulletin tient sur une
   // seule feuille, et Excel propose bien le format « Classeur Excel » à l'enregistrement.
   function exportExcel() {
-    const rows: XCell[][] = [];
-    const slipLine = (l: SlipLine): XCell[] => [
-      { v: l.code || '', s: 'textC' },
-      { v: l.label, s: 'text' },
-      { v: l.base != null ? l.base : '', s: 'num' },
-      { v: l.taux || '', s: 'textC' },
-      { v: l.gain ? l.gain : '', s: 'num' },
-      { v: l.retenue ? l.retenue : '', s: 'num' },
-    ];
-    const blank = (): XCell[] => [{ span: 6 }];
-
-    rows.push([{ v: site?.name || '', s: 'title', span: 6 }]);
-    rows.push([{ v: `${site?.address || ''}, ${site?.city || ''}`, span: 6 }]);
-    rows.push([{ v: `CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`, span: 6 }]);
-    rows.push(blank());
-    rows.push([{ v: `BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}`, s: 'title', span: 6 }]);
-    rows.push(blank());
-    rows.push([
-      { v: 'Matricule', s: 'label' }, { v: emp.matricule || '—', s: 'text' },
-      { v: 'N° CNPS', s: 'label' }, { v: emp.cnpsNumber || '—', s: 'text' },
-      { v: 'Nom & Prénom', s: 'label' }, { v: `${emp.lastName} ${emp.firstName}`, s: 'text' },
-    ]);
-    rows.push([
-      { v: 'Fonction', s: 'label' }, { v: emp.position, s: 'text' },
-      { v: 'Catégorie', s: 'label' }, { v: emp.category || '—', s: 'text' },
-      { v: "Date d'embauche", s: 'label' }, { v: fmt(emp.startDate), s: 'text' },
-    ]);
-    rows.push([
-      { v: 'Situation familiale', s: 'label' }, { v: emp.familySituation || '—', s: 'text' },
-      { v: 'Enfants', s: 'label' }, { v: String(emp.numberOfChildren ?? 0), s: 'text' },
-      { v: 'Parts', s: 'label' }, { v: String(parts), s: 'text' },
-    ]);
-    rows.push(blank());
-    rows.push(['Code', 'Rubrique', 'Base', 'Taux/Nb', 'Gains', 'Retenue'].map(v => ({ v, s: 'header' as const })));
-    gainRows.forEach(l => rows.push(slipLine(l)));
-    rows.push([{ v: 'TOTAL BRUT', s: 'totLabel', span: 4 }, { v: totalBrut, s: 'totNum' }, { s: 'totLabel' }]);
-    retenueRows.forEach(l => rows.push(slipLine(l)));
-    rows.push([{ v: 'TOTAL DES RETENUES', s: 'totLabel', span: 4 }, { s: 'totLabel' }, { v: totalRetenues, s: 'totNum' }]);
-    if (transportRow) rows.push(slipLine(transportRow));
-    rows.push(blank());
-    rows.push([{ v: 'NET À PAYER', s: 'totLabel', span: 4 }, { v: netAPayer, s: 'net', span: 2 }]);
-    rows.push(blank());
-    rows.push([{ v: 'Charges patronales (indicatif)', s: 'title', span: 6 }]);
-    ([
-      ['CNPS retraite patronale (7,7%)', cnpsPatronal],
-      ['Prestation familiale (5,75%)', prestationFamiliale],
-      ['Accident du travail (2%)', accidentTravail],
-      ['IS local (1,2%)', isLocal],
-      ["Taxe d'apprentissage (0,4%)", taxeApprentissage],
-      ['Taxe FPC (1,2%)', taxeFPC],
-    ] as [string, number][]).forEach(([label, amount]) =>
-      rows.push([{ v: label, s: 'text', span: 4 }, { v: amount, s: 'num', span: 2 }])
-    );
-
-    const blob = buildXlsxBlob({
-      sheetName: 'Bulletin',
-      colWidths: [18, 42, 14, 14, 16, 24],
-      rows,
-      orientation: 'portrait',
-    });
-    downloadBlob(`${slipFileBase}.xlsx`, blob);
+    downloadBlob(`${slipFileBase}.xlsx`, buildXlsxBlob(payslipSheet(row, periodStart, periodEnd)));
     setExportOpen(false);
   }
 
@@ -2793,7 +2819,13 @@ function AppShell() {
     const container = document.querySelector<HTMLElement>(`[data-page="${page}"]`);
     const dates = page === 'paye' && container ? Array.from(container.querySelectorAll<HTMLInputElement>('input[type="date"]')).map(i => i.value).filter(Boolean) : [];
     base += dates.length === 2 ? `_du_${dates[0]}_au_${dates[1]}` : `_${new Date().toISOString().slice(0, 10)}`;
-    if (format === 'xlsx') downloadBlob(`${base}.xlsx`, tablesToXlsxBlob(title, tables));
+    if (format === 'xlsx' && page === 'paye' && dates.length === 2) {
+      // Page Paie : classeur complet = feuille « Récapitulatif » (tableau du livre de paie)
+      // + UNE FEUILLE PAR EMPLOYÉ (bulletin de paie complet), nommée « Nom Prénom ».
+      const [start, end] = dates;
+      const slips = filtered.map(emp => payslipSheet({ emp, ...computeEmployeePayrollForPeriod(emp, start, end) } as PayrollRow, start, end));
+      downloadBlob(`${base}.xlsx`, buildWorkbookBlob([tablesToSheet(title, tables, 'Récapitulatif'), ...slips]));
+    } else if (format === 'xlsx') downloadBlob(`${base}.xlsx`, tablesToXlsxBlob(title, tables));
     else downloadTextFile(`${base}.csv`, '\uFEFF' + tablesToCsv(title, tables), 'text/csv;charset=utf-8');
   };
 

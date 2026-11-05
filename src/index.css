@@ -37,10 +37,16 @@
        sur plusieurs pages. */
     position: relative !important;
   }
-  body * {
+  /* On ne masque « tout sauf le bulletin » QUE lorsqu'un bulletin est ouvert (.print-area
+     présent). Sans bulletin (impression de la page depuis la barre du haut), la page
+     elle-même s'imprime normalement — sinon la feuille sortirait entièrement blanche. */
+  body:has(.print-area) * {
     visibility: hidden;
   }
-  .print-area, .print-area * {
+  /* Même précision de sélecteur que la règle de masquage ci-dessus (sinon :has() lui
+     donne la priorité et le bulletin resterait masqué). */
+  body:has(.print-area) .print-area,
+  body:has(.print-area) .print-area * {
     visibility: visible;
   }
   .print-area {
@@ -69,6 +75,14 @@
     position: static !important;
     display: block !important;
     padding: 0 !important;
+  }
+  /* Tableaux qui s'étalent sur plusieurs feuilles : une ligne n'est jamais coupée en deux
+     et l'en-tête des colonnes est répété en haut de chaque feuille. */
+  tr {
+    break-inside: avoid;
+  }
+  thead {
+    display: table-header-group;
   }
   * {
     print-color-adjust: exact;

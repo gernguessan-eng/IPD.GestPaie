@@ -1,6 +1,8 @@
 import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
+import { buildXlsxBlob, type XCell } from './lib/xlsx';
+import { extractTables, tablesToXlsxBlob, tablesToCsv, type ExportTable } from './lib/exportTable';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -368,14 +370,13 @@ function LoginPage({ onLogin }: { onLogin: (user: AuthUser) => void }) {
 
 /* ─── Utils ─────────────────────────────────────────────── */
 const fmt = (d: string) => new Date(d).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
-const initials = (f: string, l: string) => `${f[0]}${l[0]}`.toUpperCase();
+const initials = (f: string, l: string) => `${(f || '').trim()[0] ?? ''}${(l || '').trim()[0] ?? ''}`.toUpperCase() || '?';
 const cn = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(' ');
 const formatFCFA = (n: number | null | undefined) => (n ?? 0).toLocaleString('fr-FR') + ' FCFA';
 
-// Déclenche le téléchargement d'un fichier texte généré côté client (CSV, HTML/Excel…)
+// Déclenche le téléchargement d'un fichier généré côté client (CSV, XLSX…)
 // sans dépendance externe : Blob + lien <a> temporaire.
-function downloadTextFile(filename: string, content: string, mime: string) {
-  const blob = new Blob([content], { type: mime });
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -386,23 +387,14 @@ function downloadTextFile(filename: string, content: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-// Échappe une valeur pour une cellule HTML (export Excel via table HTML).
-function escHtml(v: string | number): string {
-  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function downloadTextFile(filename: string, content: string, mime: string) {
+  downloadBlob(filename, new Blob([content], { type: mime }));
 }
 
 // Nettoie un segment de nom de fichier : retire les caractères interdits sous Windows/macOS
 // et remplace les espaces par "_", en conservant les accents (noms français).
 function sanitizeFilenamePart(s: string): string {
   return s.trim().replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_');
-}
-
-// Formate un nombre en français pour les exports Excel/CSV. toLocaleString('fr-FR') insère
-// une espace fine insécable (U+202F) comme séparateur de milliers ; certains lecteurs Excel
-// (notamment l'import HTML→.xls) ne la décodent pas correctement et affichent "?" à la place.
-// On la remplace donc par une espace normale, strictement équivalente visuellement.
-function fmtNumExport(n: number | null | undefined): string {
-  return (n ?? 0).toLocaleString('fr-FR').replace(/[  ]/g, ' ');
 }
 
 /* ─── Icons (inline SVG) ────────────────────────────────── */
@@ -488,8 +480,8 @@ function Sidebar({
 
   return (
     <>
-      {mobileOpen && <div className="fixed inset-0 bg-black/40 z-30 lg:hidden" onClick={() => setMobileOpen(false)} />}
-      <aside className={cn('fixed top-0 left-0 z-40 h-full w-60 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 shadow-sm', mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0')}>
+      {mobileOpen && <div className="no-print fixed inset-0 bg-black/40 z-30 lg:hidden" onClick={() => setMobileOpen(false)} />}
+      <aside className={cn('no-print fixed top-0 left-0 z-40 h-full w-60 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 shadow-sm', mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0')}>
         {/* Logo */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
           <div className="h-10 w-14 rounded-lg bg-white border border-slate-100 flex items-center justify-center shadow-sm overflow-hidden p-0.5 shrink-0">
@@ -579,8 +571,9 @@ function TopBar({ title, setMobileOpen, search, setSearch, onAction }: {
   title: string; setMobileOpen: (o: boolean) => void; search: string; setSearch: (s: string) => void;
   onAction: (action: string) => void;
 }) {
+  const [exportOpen, setExportOpen] = useState(false);
   return (
-    <header className="sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-slate-100 px-4 lg:px-6 py-3 flex items-center gap-3">
+    <header className="no-print sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-slate-100 px-4 lg:px-6 py-3 flex items-center gap-3">
       <button onClick={() => setMobileOpen(true)} className="lg:hidden text-slate-400 hover:text-slate-600"><Ico name="menu" size={21} /></button>
       <h2 className="text-base font-bold text-slate-800">{title}</h2>
 
@@ -593,9 +586,24 @@ function TopBar({ title, setMobileOpen, search, setSearch, onAction }: {
 
         {/* Action buttons */}
         <ActionButton icon="save" label="Enregistrer" tooltip="Enregistrer" onClick={() => onAction('save')} />
-        <ActionButton icon="print" label="Imprimer" tooltip="Imprimer" onClick={() => onAction('print')} />
+        <ActionButton icon="print" label="Imprimer" tooltip="Imprimer la page" onClick={() => onAction('print')} />
         <ActionButton icon="import" label="Importer" tooltip="Importer" onClick={() => onAction('import')} />
-        <ActionButton icon="exportFile" label="Exporter" tooltip="Exporter" onClick={() => onAction('export')} />
+        <div className="relative">
+          <ActionButton icon="exportFile" label="Exporter" tooltip="Exporter la page affichée" onClick={() => setExportOpen(o => !o)} />
+          {exportOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setExportOpen(false)} />
+              <div className="absolute right-0 top-full mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-20">
+                <button onClick={() => { setExportOpen(false); onAction('export-xlsx'); }} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                  <Ico name="download" size={12} /> Excel (.xlsx)
+                </button>
+                <button onClick={() => { setExportOpen(false); onAction('export-csv'); }} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                  <Ico name="download" size={12} /> CSV (.csv)
+                </button>
+              </div>
+            </>
+          )}
+        </div>
 
         <button className="relative ml-1 p-1.5 text-slate-400 hover:text-orange-500 rounded-lg hover:bg-orange-50 transition-colors">
           <Ico name="bell" size={18} /><span className="absolute top-1 right-1 h-2 w-2 bg-red-500 rounded-full border-2 border-white" />
@@ -673,7 +681,7 @@ function SelectField({ label, value, onChange, options, placeholder }: {
 
 function Avatar({ emp }: { emp: Employee }) {
   return (
-    <div className="h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 shadow-sm" style={{ background: emp.avatarColor }}>
+    <div data-export-skip className="h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 shadow-sm" style={{ background: emp.avatarColor }}>
       {initials(emp.firstName, emp.lastName)}
     </div>
   );
@@ -969,6 +977,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
   }
 
   function doAdd() {
+    if (!form.firstName?.trim() || !form.lastName?.trim()) { alert("Veuillez renseigner au minimum le prénom et le nom de l'employé."); return; }
     const newEmp: Employee = {
       id: `e${Date.now()}`, firstName: form.firstName!, lastName: form.lastName!, email: form.email!, phone: form.phone!,
       position: form.position!, department: form.department!, siteId: form.siteId!, contractType: form.contractType! as Employee['contractType'],
@@ -993,6 +1002,7 @@ function EmployeesPage({ filtered }: { filtered: Employee[] }) {
   }
   function doEdit() {
     if (!editModal) return;
+    if (!form.firstName?.trim() || !form.lastName?.trim()) { alert("Le prénom et le nom de l'employé ne peuvent pas être vides."); return; }
     Object.assign(editModal, form, { components: comp, salary: computeSalary(comp) });
     persistDoc('employees', editModal.id, editModal);
     setEditModal(null);
@@ -1119,11 +1129,14 @@ function SitesPage({ search }: { search: string }) {
   const [mForm, setMForm] = useState<Partial<Site>>({});
 
   function saveNew() {
+    if (!mForm.name?.trim()) { alert('Veuillez renseigner le nom du site.'); return; }
     const ns: Site = { id:`s${Date.now()}`, name:mForm.name||'', address:mForm.address||'', city:mForm.city||'', phone:mForm.phone||'', manager:mForm.manager||'', capacity:Number(mForm.capacity)||10, cnpsEmployeur:mForm.cnpsEmployeur||'', numeroContribuable:mForm.numeroContribuable||'' };
     sites.push(ns); persistDoc('sites', ns.id, ns); setAddModal(false); bump();
   }
   function saveEdit() {
-    if(!editModal)return;Object.assign(editModal,mForm);persistDoc('sites', editModal.id, editModal);setEditModal(null);bump();
+    if(!editModal)return;
+    if(!mForm.name?.trim()){alert('Le nom du site ne peut pas être vide.');return;}
+    Object.assign(editModal,mForm);persistDoc('sites', editModal.id, editModal);setEditModal(null);bump();
   }
 
   const q = search.trim().toLowerCase();
@@ -1440,54 +1453,71 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
     `${emp.lastName || 'Nom'}_${emp.firstName || 'Prenom'}_du_${periodStart}_au_${periodEnd}`
   );
 
-  // Export Excel : fichier .xls (table HTML interprétée nativement par Excel), sans
-  // dépendance externe ni build supplémentaire — robuste pour un déploiement Vercel.
+  // Export Excel : vrai classeur .xlsx (généré sans dépendance, voir src/lib/xlsx.ts).
+  // Mise en page d'impression « ajuster à 1 page » (A4 portrait) : le bulletin tient sur une
+  // seule feuille, et Excel propose bien le format « Classeur Excel » à l'enregistrement.
   function exportExcel() {
-    const line = (l: SlipLine) => `<tr>
-      <td>${escHtml(l.code || '')}</td><td>${escHtml(l.label)}</td>
-      <td align="right">${l.base != null ? fmtNumExport(l.base) : ''}</td>
-      <td align="center">${escHtml(l.taux || '')}</td>
-      <td align="right">${l.gain ? fmtNumExport(l.gain) : ''}</td>
-      <td align="right">${l.retenue ? fmtNumExport(l.retenue) : ''}</td>
-    </tr>`;
-    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
-<head><meta charset="utf-8" />
-<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
-<x:Name>Bulletin</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
-</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
-<style>table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11px;}
-td,th{border:1px solid #cbd5e1;padding:3px 6px;} th{background:#e2e8f0;font-weight:bold;}
-.tot{background:#f1f5f9;font-weight:bold;} .title{font-size:14px;font-weight:bold;}</style></head>
-<body>
-<table>
-<tr><td class="title" colspan="6">${escHtml(site?.name || '')}</td></tr>
-<tr><td colspan="6">${escHtml(`${site?.address || ''}, ${site?.city || ''}`)}</td></tr>
-<tr><td colspan="6">${escHtml(`CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`)}</td></tr>
-<tr><td colspan="6"></td></tr>
-<tr><td class="title" colspan="6">BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}</td></tr>
-<tr><td colspan="6"></td></tr>
-<tr><td>Matricule</td><td>${escHtml(emp.matricule || '—')}</td><td>N° CNPS</td><td>${escHtml(emp.cnpsNumber || '—')}</td><td>Nom &amp; Prénom</td><td>${escHtml(`${emp.lastName} ${emp.firstName}`)}</td></tr>
-<tr><td>Fonction</td><td>${escHtml(emp.position)}</td><td>Catégorie</td><td>${escHtml(emp.category || '—')}</td><td>Date d'embauche</td><td>${fmt(emp.startDate)}</td></tr>
-<tr><td>Situation familiale</td><td>${escHtml(emp.familySituation || '—')}</td><td>Enfants</td><td>${emp.numberOfChildren ?? 0}</td><td>Parts</td><td>${parts}</td></tr>
-<tr><td colspan="6"></td></tr>
-<tr><th>Code</th><th>Rubrique</th><th>Base</th><th>Taux/Nb</th><th>Gains</th><th>Retenue</th></tr>
-${gainRows.map(line).join('')}
-<tr class="tot"><td colspan="4">TOTAL BRUT</td><td align="right">${fmtNumExport(totalBrut)}</td><td></td></tr>
-${retenueRows.map(line).join('')}
-<tr class="tot"><td colspan="4">TOTAL DES RETENUES</td><td></td><td align="right">${fmtNumExport(totalRetenues)}</td></tr>
-${transportRow ? line(transportRow) : ''}
-<tr><td colspan="6"></td></tr>
-<tr class="tot"><td colspan="2">NET À PAYER</td><td colspan="4" align="right">${fmtNumExport(netAPayer)} FCFA</td></tr>
-<tr><td colspan="6"></td></tr>
-<tr><td class="title" colspan="6">Charges patronales (indicatif)</td></tr>
-<tr><td>CNPS retraite patronale (7,7%)</td><td align="right">${fmtNumExport(cnpsPatronal)}</td><td>Prestation familiale (5,75%)</td><td align="right">${fmtNumExport(prestationFamiliale)}</td><td>Accident du travail (2%)</td><td align="right">${fmtNumExport(accidentTravail)}</td></tr>
-<tr><td>IS local (1,2%)</td><td align="right">${fmtNumExport(isLocal)}</td><td>Taxe d'apprentissage (0,4%)</td><td align="right">${fmtNumExport(taxeApprentissage)}</td><td>Taxe FPC (1,2%)</td><td align="right">${fmtNumExport(taxeFPC)}</td></tr>
-</table>
-</body></html>`;
-    // BOM UTF-8 en tête : certaines versions d'Excel ignorent le <meta charset> du HTML
-    // pour les fichiers ouverts avec l'extension .xls et retombent sur l'ANSI du poste,
-    // ce qui transforme les caractères non-ASCII (espaces insécables, accents) en "?".
-    downloadTextFile(`${slipFileBase}.xls`, '﻿' + html, 'application/vnd.ms-excel;charset=utf-8');
+    const rows: XCell[][] = [];
+    const slipLine = (l: SlipLine): XCell[] => [
+      { v: l.code || '', s: 'textC' },
+      { v: l.label, s: 'text' },
+      { v: l.base != null ? l.base : '', s: 'num' },
+      { v: l.taux || '', s: 'textC' },
+      { v: l.gain ? l.gain : '', s: 'num' },
+      { v: l.retenue ? l.retenue : '', s: 'num' },
+    ];
+    const blank = (): XCell[] => [{ span: 6 }];
+
+    rows.push([{ v: site?.name || '', s: 'title', span: 6 }]);
+    rows.push([{ v: `${site?.address || ''}, ${site?.city || ''}`, span: 6 }]);
+    rows.push([{ v: `CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`, span: 6 }]);
+    rows.push(blank());
+    rows.push([{ v: `BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}`, s: 'title', span: 6 }]);
+    rows.push(blank());
+    rows.push([
+      { v: 'Matricule', s: 'label' }, { v: emp.matricule || '—', s: 'text' },
+      { v: 'N° CNPS', s: 'label' }, { v: emp.cnpsNumber || '—', s: 'text' },
+      { v: 'Nom & Prénom', s: 'label' }, { v: `${emp.lastName} ${emp.firstName}`, s: 'text' },
+    ]);
+    rows.push([
+      { v: 'Fonction', s: 'label' }, { v: emp.position, s: 'text' },
+      { v: 'Catégorie', s: 'label' }, { v: emp.category || '—', s: 'text' },
+      { v: "Date d'embauche", s: 'label' }, { v: fmt(emp.startDate), s: 'text' },
+    ]);
+    rows.push([
+      { v: 'Situation familiale', s: 'label' }, { v: emp.familySituation || '—', s: 'text' },
+      { v: 'Enfants', s: 'label' }, { v: String(emp.numberOfChildren ?? 0), s: 'text' },
+      { v: 'Parts', s: 'label' }, { v: String(parts), s: 'text' },
+    ]);
+    rows.push(blank());
+    rows.push(['Code', 'Rubrique', 'Base', 'Taux/Nb', 'Gains', 'Retenue'].map(v => ({ v, s: 'header' as const })));
+    gainRows.forEach(l => rows.push(slipLine(l)));
+    rows.push([{ v: 'TOTAL BRUT', s: 'totLabel', span: 4 }, { v: totalBrut, s: 'totNum' }, { s: 'totLabel' }]);
+    retenueRows.forEach(l => rows.push(slipLine(l)));
+    rows.push([{ v: 'TOTAL DES RETENUES', s: 'totLabel', span: 4 }, { s: 'totLabel' }, { v: totalRetenues, s: 'totNum' }]);
+    if (transportRow) rows.push(slipLine(transportRow));
+    rows.push(blank());
+    rows.push([{ v: 'NET À PAYER', s: 'totLabel', span: 4 }, { v: netAPayer, s: 'net', span: 2 }]);
+    rows.push(blank());
+    rows.push([{ v: 'Charges patronales (indicatif)', s: 'title', span: 6 }]);
+    ([
+      ['CNPS retraite patronale (7,7%)', cnpsPatronal],
+      ['Prestation familiale (5,75%)', prestationFamiliale],
+      ['Accident du travail (2%)', accidentTravail],
+      ['IS local (1,2%)', isLocal],
+      ["Taxe d'apprentissage (0,4%)", taxeApprentissage],
+      ['Taxe FPC (1,2%)', taxeFPC],
+    ] as [string, number][]).forEach(([label, amount]) =>
+      rows.push([{ v: label, s: 'text', span: 4 }, { v: amount, s: 'num', span: 2 }])
+    );
+
+    const blob = buildXlsxBlob({
+      sheetName: 'Bulletin',
+      colWidths: [18, 42, 14, 14, 16, 24],
+      rows,
+      orientation: 'portrait',
+    });
+    downloadBlob(`${slipFileBase}.xlsx`, blob);
     setExportOpen(false);
   }
 
@@ -1531,7 +1561,7 @@ ${transportRow ? line(transportRow) : ''}
                   <div className="fixed inset-0 z-10" onClick={() => setExportOpen(false)} />
                   <div className="absolute right-0 top-full mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-20">
                     <button onClick={exportExcel} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
-                      <Ico name="download" size={12} /> Excel (.xls)
+                      <Ico name="download" size={12} /> Excel (.xlsx)
                     </button>
                     <button onClick={exportCSV} className="w-full text-left px-3 py-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2">
                       <Ico name="download" size={12} /> CSV (.csv)
@@ -2720,12 +2750,90 @@ function AppShell() {
     return employees.filter(e => `${e.firstName} ${e.lastName} ${e.position} ${e.department} ${e.email}`.toLowerCase().includes(q));
   }, [search, dataVersion]);
 
+  // Tableaux à exporter pour la page affichée : Tableau de bord et Sites n'ont pas de tableau
+  // à l'écran (cartes) → on les construit à partir des données ; les autres pages exportent
+  // exactement le tableau visible (mêmes lignes/colonnes, filtre de recherche et période inclus).
+  const getExportTables = (): ExportTable[] => {
+    if (page === 'dashboard') {
+      const depts = ['Mécanique', 'Administration', 'Finance', 'Carrosserie', 'Magasin', 'Direction'];
+      return [
+        {
+          title: 'Employés par département',
+          headers: ['Département', 'Effectif', '% du total'],
+          rows: depts.map(d => {
+            const n = filtered.filter(e => e.department === d).length;
+            return [d, n, filtered.length ? Math.round((n / filtered.length) * 100) : 0];
+          }),
+        },
+        {
+          title: 'Vue des sites',
+          headers: ['Site', 'Adresse', 'Ville', 'Effectif actif', 'Capacité'],
+          rows: sites.map(s => [s.name, s.address, s.city, filtered.filter(e => e.siteId === s.id && e.status === 'Actif').length, s.capacity]),
+        },
+      ];
+    }
+    if (page === 'sites') {
+      const q = search.trim().toLowerCase();
+      const list = q ? sites.filter(s => `${s.name} ${s.address} ${s.city} ${s.manager} ${s.phone}`.toLowerCase().includes(q)) : sites;
+      return [{
+        headers: ['Site', 'Adresse', 'Ville', 'Téléphone', 'Responsable', 'Capacité', 'Effectif actif', 'CNPS employeur', 'N° Contribuable'],
+        rows: list.map(s => [s.name, s.address, s.city, s.phone, s.manager, s.capacity, employees.filter(e => e.siteId === s.id && e.status === 'Actif').length, s.cnpsEmployeur || '', s.numeroContribuable || '']),
+      }];
+    }
+    const container = document.querySelector<HTMLElement>(`[data-page="${page}"]`);
+    return container ? extractTables(container) : [];
+  };
+
+  const exportPage = (format: 'xlsx' | 'csv') => {
+    const title = titles[page] || 'Export';
+    const tables = getExportTables().filter(t => t.headers.length > 0);
+    if (tables.length === 0) { alert('Rien à exporter sur cette page.'); return; }
+    // Nom de fichier : <Page>_<date du jour>, et pour la Paie la période choisie (du…au…).
+    let base = sanitizeFilenamePart(title.replace(/[—&']/g, ' ').replace(/\s+/g, ' '));
+    const container = document.querySelector<HTMLElement>(`[data-page="${page}"]`);
+    const dates = page === 'paye' && container ? Array.from(container.querySelectorAll<HTMLInputElement>('input[type="date"]')).map(i => i.value).filter(Boolean) : [];
+    base += dates.length === 2 ? `_du_${dates[0]}_au_${dates[1]}` : `_${new Date().toISOString().slice(0, 10)}`;
+    if (format === 'xlsx') downloadBlob(`${base}.xlsx`, tablesToXlsxBlob(title, tables));
+    else downloadTextFile(`${base}.csv`, '\uFEFF' + tablesToCsv(title, tables), 'text/csv;charset=utf-8');
+  };
+
+  // Impression de la page affichée (barre du haut). Les tableaux larges (ex. livre de paie,
+  // une trentaine de colonnes) sont réduits pour tenir sur la largeur d'une feuille A4 paysage
+  // au lieu d'être coupés ; le style temporaire est retiré dès la fin de l'impression.
+  const printPage = () => {
+    const container = document.querySelector<HTMLElement>(`[data-page="${page}"]`);
+    const hasModal = !!document.querySelector('.print-area');
+    let zoom = 1;
+    const style = document.createElement('style');
+    if (container && !hasModal) {
+      const tables = Array.from(container.querySelectorAll('table')).filter(t => !t.closest('.print-root'));
+      const cols = Math.max(0, ...tables.map(t => t.querySelectorAll('thead th').length));
+      const widest = Math.max(0, ...tables.map(t => t.scrollWidth));
+      // Tableau de 7 colonnes ou plus → feuille A4 paysage (≈ 1070 px CSS utiles, marges 7 mm
+      // déduites) ; au-delà de 12 colonnes (livre de paie) il est en plus réduit pour tenir en
+      // largeur. Les tableaux plus étroits s'adaptent d'eux-mêmes à la largeur de la feuille.
+      const wide = cols >= 7;
+      if (cols > 12 && widest > 1070) zoom = Math.max(0.25, 1070 / widest);
+      style.textContent = `@media print { @page { size: A4 ${wide ? 'landscape' : 'portrait'}; margin: 7mm; } body[data-print-page] [data-page="${page}"] { zoom: ${zoom}; } body[data-print-page] [data-page="${page}"] .overflow-x-auto { overflow: visible !important; } body[data-print-page] main { margin-left: 0 !important; } }`;
+      document.head.appendChild(style);
+      document.body.setAttribute('data-print-page', page);
+    }
+    const cleanup = () => {
+      style.remove();
+      document.body.removeAttribute('data-print-page');
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    window.print();
+  };
+
   const onAction = (action: string) => {
     switch (action) {
       case 'save': alert('Toutes les données sont déjà enregistrées automatiquement et en temps réel sur le serveur — aucune action manuelle nécessaire.'); break;
-      case 'print': window.print(); break;
-      case 'import': alert('Fonctionnalité importer'); break;
-      case 'export': alert('Export en cours...'); break;
+      case 'print': printPage(); break;
+      case 'import': alert("L'importation de fichiers n'est pas encore disponible dans cette version."); break;
+      case 'export-xlsx': exportPage('xlsx'); break;
+      case 'export-csv': exportPage('csv'); break;
     }
   };
 
@@ -2761,14 +2869,14 @@ function AppShell() {
           dans une page étaient perdus dès qu'on la quittait puis y revenait.
         */}
         <div className="p-4 lg:p-6 max-w-[1400px] mx-auto">
-          <div style={{ display: page === 'dashboard' ? 'block' : 'none' }}><PageErrorBoundary pageName="Tableau de bord"><DashboardPage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
-          <div style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
-          <div style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>
-          <div style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales annuelles"><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></PageErrorBoundary></div>
+          <div data-page="dashboard" style={{ display: page === 'dashboard' ? 'block' : 'none' }}><PageErrorBoundary pageName="Tableau de bord"><DashboardPage filtered={filtered} /></PageErrorBoundary></div>
+          <div data-page="sites" style={{ display: page === 'sites' ? 'block' : 'none' }}><PageErrorBoundary pageName="Sites"><SitesPage search={search} /></PageErrorBoundary></div>
+          <div data-page="employees" style={{ display: page === 'employees' ? 'block' : 'none' }}><PageErrorBoundary pageName="Employés"><EmployeesPage filtered={filtered} /></PageErrorBoundary></div>
+          <div data-page="paye" style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
+          <div data-page="livre-fin-annee" style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
+          <div data-page="cs-mensuelles" style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
+          <div data-page="cs-semestrielles" style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>
+          <div data-page="cs-annuelles" style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales annuelles"><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></PageErrorBoundary></div>
         </div>
       </main>
     </div>

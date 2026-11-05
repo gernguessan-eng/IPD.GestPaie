@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
+import { createPortal } from 'react-dom';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
-import { buildXlsxBlob, buildWorkbookBlob, type XCell, type XlsxOptions } from './lib/xlsx';
-import { extractTables, tablesToSheet, tablesToXlsxBlob, tablesToCsv, type ExportTable } from './lib/exportTable';
+import { buildXlsxBlob, buildWorkbookBlob, readImageInfo, fitLogo, type XCell, type XImage, type XlsxOptions } from './lib/xlsx';
+import { extractTables, tablesToSheet, tablesToXlsxBlob, tablesToCsv, withLogoHeader, type ExportTable } from './lib/exportTable';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -389,6 +390,19 @@ function downloadBlob(filename: string, blob: Blob) {
 
 function downloadTextFile(filename: string, content: string, mime: string) {
   downloadBlob(filename, new Blob([content], { type: mime }));
+}
+
+// Logo de l'entreprise, chargé une seule fois puis réutilisé pour intégrer l'image dans chaque
+// feuille des exports Excel. En cas d'échec (réseau, format), l'export se fait simplement sans logo.
+let logoAssetPromise: Promise<XImage | null> | null = null;
+function loadLogoAsset(): Promise<XImage | null> {
+  if (!logoAssetPromise) {
+    logoAssetPromise = fetch(logo)
+      .then(r => r.arrayBuffer())
+      .then(buf => readImageInfo(new Uint8Array(buf)))
+      .catch(() => null);
+  }
+  return logoAssetPromise;
 }
 
 // Nettoie un segment de nom de fichier : retire les caractères interdits sous Windows/macOS
@@ -1456,7 +1470,7 @@ function computeSlipData(row: PayrollRow) {
 }
 
 // Feuille Excel d'UN bulletin de paie (A4 portrait, ajustée sur une seule page).
-function payslipSheet(row: PayrollRow, periodStart: string, periodEnd: string): XlsxOptions {
+function payslipSheet(row: PayrollRow, periodStart: string, periodEnd: string, image: XImage | null = null): XlsxOptions {
   const { emp } = row;
   const {
     parts, totalBrut, totalRetenues, netAPayer, cnpsPatronal, prestationFamiliale, accidentTravail, isLocal, taxeApprentissage, taxeFPC,
@@ -1473,9 +1487,10 @@ function payslipSheet(row: PayrollRow, periodStart: string, periodEnd: string): 
   ];
   const blank = (): XCell[] => [{ span: 6 }];
 
-  rows.push([{ v: site?.name || '', s: 'title', span: 6 }]);
-  rows.push([{ v: `${site?.address || ''}, ${site?.city || ''}`, span: 6 }]);
-  rows.push([{ v: `CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`, span: 6 }]);
+  // En-tête : logo à gauche (colonne A), identité de l'entreprise à droite — comme sur le bulletin imprimé.
+  rows.push([{ s: 'default' }, { v: site?.name || '', s: 'title', span: 5 }]);
+  rows.push([{ s: 'default' }, { v: `${site?.address || ''}, ${site?.city || ''}`, span: 5 }]);
+  rows.push([{ s: 'default' }, { v: `CNPS employeur : ${site?.cnpsEmployeur || '—'} · N° Contribuable : ${site?.numeroContribuable || '—'}`, span: 5 }]);
   rows.push(blank());
   rows.push([{ v: `BULLETIN DE PAIE — Du ${fmt(periodStart)} au ${fmt(periodEnd)}`, s: 'title', span: 6 }]);
   rows.push(blank());
@@ -1521,6 +1536,7 @@ function payslipSheet(row: PayrollRow, periodStart: string, periodEnd: string): 
     colWidths: [18, 42, 14, 14, 16, 24],
     rows,
     orientation: 'portrait',
+    ...(image ? { logo: { col: 0, row: 0, ...fitLogo(image, 118, 54) } } : {}),
   };
 }
 
@@ -1542,8 +1558,9 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
   // Export Excel : vrai classeur .xlsx (généré sans dépendance, voir src/lib/xlsx.ts).
   // Mise en page d'impression « ajuster à 1 page » (A4 portrait) : le bulletin tient sur une
   // seule feuille, et Excel propose bien le format « Classeur Excel » à l'enregistrement.
-  function exportExcel() {
-    downloadBlob(`${slipFileBase}.xlsx`, buildXlsxBlob(payslipSheet(row, periodStart, periodEnd)));
+  async function exportExcel() {
+    const image = await loadLogoAsset();
+    downloadBlob(`${slipFileBase}.xlsx`, buildXlsxBlob(payslipSheet(row, periodStart, periodEnd, image), image));
     setExportOpen(false);
   }
 
@@ -1569,10 +1586,19 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
     setExportOpen(false);
   }
 
-  return (
+  // Réduction à l'impression en PAYSAGE (page peu haute) lorsque le bulletin compte beaucoup de
+  // rubriques (heures sup, primes, prêt, acompte…) : jusqu'à ~16 lignes il tient tel quel ;
+  // au-delà, on le réduit proportionnellement pour qu'il reste sur UNE seule feuille.
+  const tableRowCount = gainRows.length + retenueRows.length + (transportRow ? 1 : 0) + 2;
+  const slipPrintZoom = Math.max(0.45, Math.min(1, 26 / (10 + tableRowCount)));
+
+  // Rendu via un portail directement dans <body> : à l'impression, tout le reste de l'application
+  // (menu, pages, tableaux…) est retiré de la mise en page (display:none), de sorte que la hauteur
+  // du document ne dépend QUE du bulletin → une seule feuille, jamais de 2e page blanche.
+  return createPortal(
     <div className="print-root fixed inset-0 z-50 flex items-center justify-center p-4 print:p-0 print:static print:block">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm no-print" onClick={onClose} />
-      <div className="print-area relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto print:max-w-none print:max-h-none print:h-auto print:w-full print:overflow-visible print:shadow-none print:rounded-none">
+      <div className="print-area relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto print:max-w-none print:max-h-none print:h-auto print:w-full print:overflow-visible print:shadow-none print:rounded-none" style={{ ['--slip-zoom' as string]: slipPrintZoom }}>
         {/* En-tête modale */}
         <div className="no-print sticky top-0 bg-white px-6 py-3 border-b border-slate-100 flex items-center justify-between z-10">
           <h3 className="text-sm font-bold text-slate-800">Bulletin de paie {isCadre ? '— CADRE' : `— ${emp.professionalStatus.toUpperCase()}`}</h3>
@@ -1602,7 +1628,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
 
         {/* Corps : Bulletin */}
         <div className="p-6 print:p-0 print-body">
-          <div className={cn('border-2 rounded-lg overflow-hidden', isCadre ? 'border-indigo-300' : 'border-slate-300')}>
+          <div className={cn('bulletin-card border-2 rounded-lg overflow-hidden', isCadre ? 'border-indigo-300' : 'border-slate-300')}>
             {/* Bandeau titre + logo */}
             <div className={cn('bulletin-header flex items-start justify-between p-4 border-b-2', isCadre ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200 bg-slate-50')}>
               <div className="flex items-start gap-3">
@@ -1653,6 +1679,7 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
             )}
 
             {/* Tableau gains / retenues */}
+            <div className="bulletin-table">
             <table className="w-full">
               <thead>
                 <tr className={cn(isCadre ? 'bg-indigo-50' : 'bg-slate-100')}>
@@ -1684,8 +1711,11 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
 
                 {/* Indemnité non imposable, versée hors brut/cotisations */}
                 {transportRow && <PaySlipRow {...transportRow} />}
+                {/* Ligne « de remplissage » (impression uniquement) : absorbe la hauteur restante pour que le bulletin couvre toute la feuille */}
+                <tr className="bulletin-filler"><td colSpan={6}></td></tr>
               </tbody>
             </table>
+            </div>
 
             {/* Net à payer */}
             <div className={cn('bulletin-net flex items-center justify-between p-4 border-t-2', isCadre ? 'border-indigo-300 bg-indigo-50' : 'border-slate-300 bg-slate-100')}>
@@ -1734,7 +1764,8 @@ function PaySlipModal({ row, periodStart, periodEnd, onClose }: { row: PayrollRo
           </p>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2810,7 +2841,7 @@ function AppShell() {
     return container ? extractTables(container) : [];
   };
 
-  const exportPage = (format: 'xlsx' | 'csv') => {
+  const exportPage = async (format: 'xlsx' | 'csv') => {
     const title = titles[page] || 'Export';
     const tables = getExportTables().filter(t => t.headers.length > 0);
     if (tables.length === 0) { alert('Rien à exporter sur cette page.'); return; }
@@ -2819,13 +2850,14 @@ function AppShell() {
     const container = document.querySelector<HTMLElement>(`[data-page="${page}"]`);
     const dates = page === 'paye' && container ? Array.from(container.querySelectorAll<HTMLInputElement>('input[type="date"]')).map(i => i.value).filter(Boolean) : [];
     base += dates.length === 2 ? `_du_${dates[0]}_au_${dates[1]}` : `_${new Date().toISOString().slice(0, 10)}`;
+    const image = format === 'xlsx' ? await loadLogoAsset() : null;
     if (format === 'xlsx' && page === 'paye' && dates.length === 2) {
       // Page Paie : classeur complet = feuille « Récapitulatif » (tableau du livre de paie)
       // + UNE FEUILLE PAR EMPLOYÉ (bulletin de paie complet), nommée « Nom Prénom ».
       const [start, end] = dates;
-      const slips = filtered.map(emp => payslipSheet({ emp, ...computeEmployeePayrollForPeriod(emp, start, end) } as PayrollRow, start, end));
-      downloadBlob(`${base}.xlsx`, buildWorkbookBlob([tablesToSheet(title, tables, 'Récapitulatif'), ...slips]));
-    } else if (format === 'xlsx') downloadBlob(`${base}.xlsx`, tablesToXlsxBlob(title, tables));
+      const slips = filtered.map(emp => payslipSheet({ emp, ...computeEmployeePayrollForPeriod(emp, start, end) } as PayrollRow, start, end, image));
+      downloadBlob(`${base}.xlsx`, buildWorkbookBlob([withLogoHeader(tablesToSheet(title, tables, 'Récapitulatif'), image), ...slips], image));
+    } else if (format === 'xlsx') downloadBlob(`${base}.xlsx`, tablesToXlsxBlob(title, tables, image));
     else downloadTextFile(`${base}.csv`, '\uFEFF' + tablesToCsv(title, tables), 'text/csv;charset=utf-8');
   };
 

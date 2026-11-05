@@ -32,6 +32,45 @@ export interface XlsxOptions {
   orientation?: 'portrait' | 'landscape';
   /** Nombre de pages en hauteur (1 = tout sur une page ; 0 = automatique, tableaux longs). */
   fitToHeight?: number;
+  /** Emplacement du logo sur cette feuille (l'image elle-même est fournie au classeur). */
+  logo?: { col: number; row: number; widthPx: number; heightPx: number };
+}
+
+/** Image intégrée au classeur (partagée par toutes les feuilles qui y font référence). */
+export interface XImage {
+  data: Uint8Array;
+  ext: 'jpeg' | 'png';
+  width: number;   // dimensions d'origine en pixels
+  height: number;
+}
+
+/** Dimensions d'affichage (px) du logo, proportions conservées, contenues dans maxW × maxH. */
+export function fitLogo(img: XImage, maxW: number, maxH: number): { widthPx: number; heightPx: number } {
+  const ratio = Math.min(maxW / img.width, maxH / img.height);
+  return { widthPx: Math.round(img.width * ratio), heightPx: Math.round(img.height * ratio) };
+}
+
+/** Lit le format et les dimensions d'une image JPEG ou PNG (sans la décoder). */
+export function readImageInfo(bytes: Uint8Array): XImage | null {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // PNG : signature 89 50 4E 47, dimensions dans le bloc IHDR
+  if (bytes.length > 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return { data: bytes, ext: 'png', width: dv.getUint32(16), height: dv.getUint32(20) };
+  }
+  // JPEG : FF D8, puis parcours des segments jusqu'au marqueur « Start Of Frame »
+  if (bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) { i++; continue; }
+      const marker = bytes[i + 1];
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+      const len = dv.getUint16(i + 2);
+      const isSOF = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (isSOF) return { data: bytes, ext: 'jpeg', height: dv.getUint16(i + 5), width: dv.getUint16(i + 7) };
+      i += 2 + len;
+    }
+  }
+  return null;
 }
 
 // Index de style (cellXfs) — doit rester synchronisé avec STYLES_XML ci-dessous.
@@ -109,7 +148,7 @@ function safeSheetName(name: string): string {
 
 /* ─── Feuille de calcul ───────────────────────────────────── */
 
-function buildSheetXml(opts: XlsxOptions): string {
+function buildSheetXml(opts: XlsxOptions, hasDrawing: boolean): string {
   const { colWidths, rows, orientation = 'portrait', fitToHeight = 1 } = opts;
   const merges: string[] = [];
 
@@ -148,7 +187,7 @@ function buildSheetXml(opts: XlsxOptions): string {
     : '';
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 <sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>
 <dimension ref="A1:${lastCol}${Math.max(rows.length, 1)}"/>
 <sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews>
@@ -159,6 +198,7 @@ ${mergeXml}
 <printOptions horizontalCentered="1"/>
 <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>
 <pageSetup paperSize="9" orientation="${orientation}" fitToWidth="1" fitToHeight="${fitToHeight}"/>
+${hasDrawing ? '<drawing r:id="rId1"/>' : ''}
 </worksheet>`;
 }
 
@@ -263,8 +303,8 @@ function zipStore(files: { name: string; data: Uint8Array }[]): Uint8Array {
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 /** Construit un classeur .xlsx d'une seule feuille (Blob prêt à être téléchargé). */
-export function buildXlsxBlob(opts: XlsxOptions): Blob {
-  return buildWorkbookBlob([opts]);
+export function buildXlsxBlob(opts: XlsxOptions, image?: XImage | null): Blob {
+  return buildWorkbookBlob([opts], image);
 }
 
 // Noms de feuilles uniques (Excel ignore la casse) et limités à 31 caractères : en cas de
@@ -284,11 +324,13 @@ function uniqueSheetNames(names: string[]): string[] {
 }
 
 /** Construit un classeur .xlsx de plusieurs feuilles, dans l'ordre donné. */
-export function buildWorkbookBlob(sheets: XlsxOptions[]): Blob {
+export function buildWorkbookBlob(sheets: XlsxOptions[], image?: XImage | null): Blob {
   const names = uniqueSheetNames(sheets.map(s => s.sheetName));
   const enc = new TextEncoder();
   const xml = (s: string) => enc.encode(s);
   const n = sheets.length;
+  // Une feuille n'affiche le logo que si l'image est fournie ET qu'elle le demande.
+  const withLogo = sheets.map(sh => !!(image && sh.logo));
 
   const sheetOverrides = sheets
     .map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`)
@@ -299,6 +341,8 @@ export function buildWorkbookBlob(sheets: XlsxOptions[]): Blob {
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 ${sheetOverrides}
+${image ? `<Default Extension="${image.ext}" ContentType="image/${image.ext}"/>` : ''}
+${sheets.map((_, i) => withLogo[i] ? `<Override PartName="/xl/drawings/drawing${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>` : '').join('\n')}
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 </Types>`;
 
@@ -323,14 +367,44 @@ ${sheetRels}
 <Relationship Id="rId${n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`;
 
-  const zip = zipStore([
+  const files: { name: string; data: Uint8Array }[] = [
     { name: '[Content_Types].xml', data: xml(contentTypes) },
     { name: '_rels/.rels', data: xml(rootRels) },
     { name: 'xl/workbook.xml', data: xml(workbook) },
     { name: 'xl/_rels/workbook.xml.rels', data: xml(workbookRels) },
-    ...sheets.map((sh, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xml(buildSheetXml(sh)) })),
+    ...sheets.map((sh, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xml(buildSheetXml(sh, withLogo[i])) })),
     { name: 'xl/styles.xml', data: xml(STYLES_XML) },
-  ]);
+  ];
+  if (image) {
+    files.push({ name: `xl/media/image1.${image.ext}`, data: image.data });
+    sheets.forEach((sh, i) => {
+      if (!withLogo[i] || !sh.logo) return;
+      const { col, row, widthPx, heightPx } = sh.logo;
+      const cx = Math.round(widthPx * 9525), cy = Math.round(heightPx * 9525);
+      files.push({ name: `xl/worksheets/_rels/sheet${i + 1}.xml.rels`, data: xml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${i + 1}.xml"/>
+</Relationships>`) });
+      files.push({ name: `xl/drawings/_rels/drawing${i + 1}.xml.rels`, data: xml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.${image.ext}"/>
+</Relationships>`) });
+      files.push({ name: `xl/drawings/drawing${i + 1}.xml`, data: xml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<xdr:oneCellAnchor>
+<xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>38100</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>28575</xdr:rowOff></xdr:from>
+<xdr:ext cx="${cx}" cy="${cy}"/>
+<xdr:pic>
+<xdr:nvPicPr><xdr:cNvPr id="2" name="Logo"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>
+<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+</xdr:pic>
+<xdr:clientData/>
+</xdr:oneCellAnchor>
+</xdr:wsDr>`) });
+    });
+  }
+  const zip = zipStore(files);
 
   // `out` (dans zipStore) est un tampon neuf dont .buffer couvre exactement le fichier.
   return new Blob([zip.buffer as ArrayBuffer], { type: XLSX_MIME });

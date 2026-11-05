@@ -23,59 +23,84 @@
    feuille, et il doit la couvrir entièrement quel que soit le format/orientation choisi
    dans la boîte de dialogue d'impression (le reste de l'application — menu, barre du
    haut, boutons de la fenêtre modale — est masqué via .no-print). */
+/* La ligne de remplissage du bulletin n'existe qu'à l'impression. */
+.bulletin-filler {
+  display: none;
+}
+
 @media print {
   @page {
     margin: 7mm;
   }
   html, body {
     background: #fff !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
-  body {
-    /* Ancre connue et stable pour le positionnement de .print-area (voir plus bas) :
-       sans ceci, le navigateur remonterait l'arbre DOM à la recherche du premier
-       ancêtre positionné, ce qui est imprévisible et peut décaler/tronquer le bulletin
-       sur plusieurs pages. */
-    position: relative !important;
+
+  .no-print {
+    display: none !important;
   }
-  /* On ne masque « tout sauf le bulletin » QUE lorsqu'un bulletin est ouvert (.print-area
-     présent). Sans bulletin (impression de la page depuis la barre du haut), la page
-     elle-même s'imprime normalement — sinon la feuille sortirait entièrement blanche. */
-  body:has(.print-area) * {
-    visibility: hidden;
+
+  /* ── Impression d'un BULLETIN DE PAIE ─────────────────────────────────────────────────
+     Le bulletin est rendu dans un portail directement sous <body> (.print-root). Dès qu'il
+     est ouvert, TOUT le reste de l'application est retiré de la mise en page : la hauteur du
+     document ne dépend plus que du bulletin, qui occupe donc exactement UNE feuille (jamais
+     de 2e page blanche) et en couvre toute la surface utile, quel que soit le format de papier
+     et l'orientation choisis dans la boîte de dialogue d'impression. */
+  body:has(.print-area) > *:not(.print-root) {
+    display: none !important;
   }
-  /* Même précision de sélecteur que la règle de masquage ci-dessus (sinon :has() lui
-     donne la priorité et le bulletin resterait masqué). */
-  body:has(.print-area) .print-area,
-  body:has(.print-area) .print-area * {
-    visibility: visible;
+  .print-root {
+    position: static !important;
+    display: block !important;
+    padding: 0 !important;
+    background: none !important;
+    overflow: visible !important;
   }
   .print-area {
-    position: absolute !important;
-    inset: 0 !important;
+    position: static !important;
+    display: flex !important;
+    flex-direction: column !important;
     width: 100% !important;
     max-width: none !important;
-    height: auto !important;
+    /* 100vh = hauteur utile d'une page imprimée ; le -1px évite qu'un arrondi ne fasse
+       déborder le bulletin sur une 2e feuille. */
+    height: calc(100vh - 1px) !important;
     max-height: none !important;
-    overflow: visible !important;
+    overflow: hidden !important;
     margin: 0 !important;
     padding: 0 !important;
     box-shadow: none !important;
     border-radius: 0 !important;
   }
-  .no-print {
-    display: none !important;
-  }
   .print-area .print-body {
+    flex: 1 1 auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
     padding: 0 !important;
   }
-  /* Neutralise le positionnement/centrage/padding de l'enveloppe de la fenêtre modale,
-     pour que .print-area (position: absolute) se positionne par rapport à la page et non
-     par rapport à une boîte centrée en écran. */
-  .print-root {
-    position: static !important;
-    display: block !important;
-    padding: 0 !important;
+  /* Le cadre du bulletin s'étire sur toute la hauteur ; le tableau absorbe l'espace restant
+     (ligne de remplissage) pour que le contenu soit réparti sur toute la feuille. */
+  .print-area .bulletin-card {
+    flex: 1 1 auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
   }
+  .print-area .bulletin-table {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+  }
+  .print-area .bulletin-table table {
+    height: 100% !important;
+  }
+  .print-area .bulletin-filler {
+    display: table-row !important;
+    height: 100% !important;
+  }
+
   /* Tableaux qui s'étalent sur plusieurs feuilles : une ligne n'est jamais coupée en deux
      et l'en-tête des colonnes est répété en haut de chaque feuille. */
   tr {
@@ -96,6 +121,10 @@
    en paysage — en portrait le bulletin garde ses espacements normaux, identiques à ce qui
    s'affiche à l'écran, pour bien remplir la page au lieu de laisser un grand vide en bas. */
 @media print and (orientation: landscape) {
+  /* Bulletin très chargé : réduction proportionnelle (variable calculée selon le nombre de lignes). */
+  .print-area .bulletin-card {
+    zoom: var(--slip-zoom, 1);
+  }
   .print-area .bulletin-header,
   .print-area .bulletin-net {
     padding: 0.5rem !important;

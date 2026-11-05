@@ -3,7 +3,7 @@
  * (ou des tableaux construits à partir des données) et les convertit en .xlsx ou .csv.
  * Utilisé par le bouton « Exporter » de la barre du haut.
  */
-import { buildXlsxBlob, type XCell, type XlsxOptions } from './xlsx';
+import { buildXlsxBlob, fitLogo, type XCell, type XImage, type XlsxOptions } from './xlsx';
 
 export type ExportCell = string | number;
 export interface ExportTable {
@@ -134,8 +134,19 @@ export function tablesToSheet(pageTitle: string, tables: ExportTable[], sheetNam
   };
 }
 
-export function tablesToXlsxBlob(pageTitle: string, tables: ExportTable[]): Blob {
-  return buildXlsxBlob(tablesToSheet(pageTitle, tables));
+/** Réserve 3 lignes vides en haut de la feuille et y place le logo (coin supérieur gauche). */
+export function withLogoHeader(sheet: XlsxOptions, image: XImage | null): XlsxOptions {
+  if (!image) return sheet;
+  const blank = (): XCell[] => [{ span: Math.max(1, sheet.colWidths.length) }];
+  return {
+    ...sheet,
+    rows: [blank(), blank(), blank(), ...sheet.rows],
+    logo: { col: 0, row: 0, ...fitLogo(image, 130, 54) },
+  };
+}
+
+export function tablesToXlsxBlob(pageTitle: string, tables: ExportTable[], image: XImage | null = null): Blob {
+  return buildXlsxBlob(withLogoHeader(tablesToSheet(pageTitle, tables), image), image);
 }
 
 /* ─── Conversion en .csv ──────────────────────────────────── */

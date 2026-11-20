@@ -165,3 +165,14 @@
     margin-top: 0.25rem !important;
   }
 }
+
+/* Champs numériques : pas de flèches haut/bas (spinners) — saisie au clavier uniquement. */
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

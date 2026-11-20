@@ -20,9 +20,9 @@ export type SalaryComponents = {
   seniority: number;              // Prime d'ancienneté — conservé pour compat, RECALCULÉ automatiquement (voir computeAncienneteAmount)
   housing: number;                // Indemnité de logement (extension imposable)
   transport: number;              // Indemnité de transport — NON imposable, versée hors brut fiscal (AA / Y)
-  representation: number;         // Indemnité de représentation — composante de la "Prime de fonction" imposable (J)
+  representation: number;         // « Indemnité de congé » (ex-indemnité de représentation) — imposable, comptée avec la "Prime de fonction" (J)
   responsibility: number;         // Prime de responsabilité — composante de la "Prime de fonction" imposable (J)
-  performance: number;            // Prime de rendement / performance (extension imposable)
+  performance: number;            // « Gratification » (ex-prime de rendement) — extension imposable
   boisson: number;                // Prime de boisson (extension imposable)
   other: number;                  // Autres primes (extension imposable)
   primeFonctionNonImposable: number; // Prime de fonction NON imposable (I) — issue de l'onglet "MODE D'EMPLOI" (AJ)

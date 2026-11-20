@@ -828,6 +828,24 @@ function SalaryLine({ label, value, onChange }: { label: string; value: number; 
   );
 }
 
+// Deux rubriques placées côte à côte (libellé au-dessus du champ)
+function SalaryPair({ items }: { items: { label: string; value: number; onChange: (v: number) => void }[] }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      {items.map(it => (
+        <div key={it.label} className="space-y-1">
+          <label className="text-[11px] text-slate-600">{it.label}</label>
+          <div className="flex items-center gap-1.5">
+            <input type="number" min={0} step={5000} value={it.value || 0} onChange={(e) => it.onChange(Number(e.target.value))}
+              className="w-full min-w-0 px-2.5 py-1.5 text-xs text-right border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+            <span className="text-[9px] text-slate-400">FCFA</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Bloc complet des rubriques de paie (réutilisé add/edit)
 function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryComponents; onChange: (c: SalaryComponents) => void; startDate?: string }) {
   const total = computeSalary(comp);
@@ -852,9 +870,11 @@ function SalaryComponentsForm({ comp, onChange, startDate }: { comp: SalaryCompo
         <SalaryLine label="Indemnité de transport (non imposable)" value={comp.transport} onChange={(v) => set('transport', v)} />
         <SalaryLine label="Prime de fonction non imposable" value={comp.primeFonctionNonImposable} onChange={(v) => set('primeFonctionNonImposable', v)} />
         <SalaryLine label="Indemnité de responsabilité non taxable" value={comp.indemniteResponsabiliteNonTaxable} onChange={(v) => set('indemniteResponsabiliteNonTaxable', v)} />
-        <SalaryLine label="Indemnité de représentation" value={comp.representation} onChange={(v) => set('representation', v)} />
         <SalaryLine label="Prime de responsabilité" value={comp.responsibility} onChange={(v) => set('responsibility', v)} />
-        <SalaryLine label="Prime de rendement" value={comp.performance} onChange={(v) => set('performance', v)} />
+        <SalaryPair items={[
+          { label: 'Gratification', value: comp.performance, onChange: (v) => set('performance', v) },
+          { label: 'Indemnité de congé', value: comp.representation, onChange: (v) => set('representation', v) },
+        ]} />
         <SalaryLine label="Autres primes" value={comp.other} onChange={(v) => set('other', v)} />
       </div>
       <div className="flex items-center justify-between px-1 pt-1">
@@ -1440,13 +1460,14 @@ function computeSlipData(row: PayrollRow) {
     { code: '10', label: 'SALAIRE', base: c.baseSalary, taux: `${joursPayes} j`, gain: baseSalaryProrated },
     ...(c.sursalaire > 0 ? [{ code: '11', label: 'SURSALAIRE', base: c.sursalaire, taux: `${joursPayes} j`, gain: sursalaireProrated }] : []),
     ...(ancienneteAmount > 0 ? [{ code: '15', label: 'PRIME ANCIENNETÉ', base: c.baseSalary, taux: `${ancienneteRatePct}%`, gain: ancienneteAmount }] : []),
-    ...(primeFonctionImposable > 0 ? [{ code: '20', label: 'PRIME DE FONCTION', base: primeFonctionImposable, gain: primeFonctionImposable }] : []),
+    ...(c.responsibility > 0 ? [{ code: '20', label: 'PRIME DE FONCTION', base: c.responsibility, gain: c.responsibility }] : []),
+    ...(c.representation > 0 ? [{ code: '25', label: 'INDEMNITÉ DE CONGÉ', base: c.representation, gain: c.representation }] : []),
     ...(c.primeFonctionNonImposable > 0 ? [{ code: '21', label: 'PRIME DE FONCTION NON IMPOSABLE', base: c.primeFonctionNonImposable, gain: c.primeFonctionNonImposable }] : []),
     ...(c.indemniteResponsabiliteNonTaxable > 0 ? [{ code: '26', label: 'INDEMNITÉ DE RESPONSABILITÉ NON TAXABLE', base: c.indemniteResponsabiliteNonTaxable, gain: c.indemniteResponsabiliteNonTaxable }] : []),
     ...(c.housing > 0 ? [{ code: '22', label: 'INDEMNITÉ DE LOGEMENT', base: c.housing, gain: c.housing }] : []),
-    ...(c.performance > 0 ? [{ code: '23', label: 'PRIME DE RENDEMENT', base: c.performance, gain: c.performance }] : []),
+    ...(c.performance > 0 ? [{ code: '23', label: 'GRATIFICATION', base: c.performance, gain: c.performance }] : []),
     ...(c.boisson > 0 ? [{ code: '24', label: 'PRIME DE BOISSON', base: c.boisson, gain: c.boisson }] : []),
-    ...(c.other > 0 ? [{ code: '76', label: 'GRATIFICATION / AUTRES PRIMES', base: c.other, gain: c.other }] : []),
+    ...(c.other > 0 ? [{ code: '76', label: 'AUTRES PRIMES', base: c.other, gain: c.other }] : []),
     ...OVERTIME_RATES.filter(r => ot[r.key] > 0).map(r => ({
       code: '12', label: `HEURE SUPPLÉMENTAIRE +${r.label}`, taux: `${ot[r.key]} h`,
       gain: Math.round(ot[r.key] * row.hourlyRate * (1 + r.rate)),
@@ -2612,13 +2633,13 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
           <NumField label="Taux de prime d'ancienneté (%)" value={ancienneteRatePct} onChange={upd(setAncienneteRatePct)}
             hint={selectedEmp ? `Calculé depuis la date d'embauche à fin ${range.label} (modifiable).` : '1% par année de service (2 à 25 ans), 25% max.'} />
           <NumField label="Prime de fonction (imposable)" value={primeFonctionImposable} onChange={upd(setPrimeFonctionImposable)}
-            hint="Représentation + responsabilité." />
+            hint="Prime de responsabilité + indemnité de congé." />
           <NumField label="Prime de fonction (non imposable)" value={primeFonctionNonImposable} onChange={upd(setPrimeFonctionNonImposable)}
             hint="Exclue de l'IGR et de la CNPS." />
           <NumField label="Indemnité de responsabilité (non taxable)" value={indemniteRespNonTaxable} onChange={upd(setIndemniteRespNonTaxable)}
             hint="Exclue de l'IGR, incluse dans la base CNPS." />
           <NumField label="Autres primes imposables" value={autresPrimesImposables} onChange={upd(setAutresPrimesImposables)}
-            hint="Logement, performance, prime exceptionnelle, autre." />
+            hint="Logement, gratification, prime exceptionnelle, autre." />
           <NumField label="Indemnité de transport (non imposable)" value={transport} onChange={upd(setTransport)}
             hint="Ajoutée après les retenues, comme sur le bulletin." />
 
@@ -2910,10 +2931,16 @@ function SoldeToutComptePage({ filtered }: { filtered: Employee[] }) {
         <img src={logo} alt="I.P & D" style={{ height: 104, width: 'auto' }} className="mb-3" />
 
         <div style={G} className={ink}>
-          <div style={col(1, 6)} className="text-center font-bold underline text-[14.5px]">
-            <div className="flex items-center justify-center gap-1">
-              <span>SOLDE DE TOUT COMPTE :</span>
-              <span className="print:hidden"><SheetField value={form.title} onChange={v => patch({ title: v.toUpperCase() })} display="" align="left" width="230px" /></span>
+          <div style={col(1, 6)} className="text-center font-bold underline text-[14.5px] whitespace-normal">
+            <div className="flex flex-wrap items-center justify-center gap-x-1">
+              <span className="whitespace-nowrap">SOLDE DE TOUT COMPTE :</span>
+              {/* Nom : le champ s'adapte à sa longueur et passe à la ligne si nécessaire (aucune limite). */}
+              <textarea value={form.title} rows={1} spellCheck={false}
+                ref={el => { if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; } }}
+                onChange={e => patch({ title: e.target.value.replace(/\n/g, ' ').toUpperCase() })}
+                onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
+                style={{ width: form.title.length > 36 ? '100%' : Math.max(16, form.title.length * 0.85 + 2) + 'em' }}
+                className="print:hidden max-w-full resize-none overflow-hidden text-center font-bold text-[14.5px] leading-[21px] bg-orange-50/70 border-b border-dashed border-orange-400 rounded-sm px-1 py-0 focus:outline-none focus:bg-orange-100" />
               <span className="hidden print:inline">{form.title}</span>
             </div>
           </div>

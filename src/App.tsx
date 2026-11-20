@@ -1,9 +1,10 @@
-import { useState, useMemo, useEffect, useContext, createContext, Component } from 'react';
+import { useState, useMemo, useEffect, useRef, useContext, createContext, Component } from 'react';
 import { createPortal } from 'react-dom';
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db, ensureAnonymousAuth } from './lib/firebase';
 import { buildXlsxBlob, buildWorkbookBlob, readImageInfo, fitLogo, type XCell, type XImage, type XlsxOptions } from './lib/xlsx';
 import { extractTables, tablesToSheet, tablesToXlsxBlob, tablesToCsv, withLogoHeader, type ExportTable } from './lib/exportTable';
+import { buildSoldeXlsx, computeSolde, emptyForm, emptyMois, fmtInt, fmtDec1, fmtDate, fmtMonth, soldeCsvLines, MOIS_ROWS, type SoldeForm, type SoldeRecord } from './lib/soldeToutCompte';
 import logo from './assets/logo.jpg';
 import {
   sites, employees, payrollOverrides, computeSalary, OVERTIME_RATES, emptyOvertime,
@@ -482,6 +483,7 @@ function Sidebar({
     { key: 'paye', label: 'Paie', icon: 'paye' },
     { key: 'livre-fin-annee', label: "Livre de paie (fin d'année)", icon: 'receipt' },
     { key: 'reconstitution', label: 'Reconstitution', icon: 'search' },
+    { key: 'solde-tout-compte', label: 'Solde de tout compte', icon: 'briefcase' },
     {
       key: 'charges-sociales', label: 'Charges sociales', icon: 'shield', children: [
         { key: 'cs-mensuelles', label: 'C.S mensuelles' },
@@ -2745,6 +2747,267 @@ function ReconstitutionPage({ filtered }: { filtered: Employee[] }) {
   );
 }
 
+/* ══════════════════════════════════════════════════════ */
+/* PAGE: SOLDE DE TOUT COMPTE                              */
+/* ══════════════════════════════════════════════════════ */
+// Reproduit à l'identique le classeur « Solde de tout compte » : mêmes rubriques, mêmes formules,
+// même présentation A4 (logo, 13 lignes de salaires, congé payé, gratification…). Les champs
+// pointillés orange sont modifiables ; tout le reste est calculé. L'export Excel remplit le
+// fichier modèle lui-même (formules conservées). Un brouillon par employé est enregistré
+// automatiquement (collection Firestore « soldes »).
+
+const soldes: SoldeRecord[] = [];
+// Formulaire affiché — lu par le bouton « Exporter » de la barre du haut.
+let currentSolde: SoldeForm | null = null;
+
+function soldeFilename(form: SoldeForm, ext: string): string {
+  const who = sanitizeFilenamePart(form.title.trim() || 'salarié');
+  return `Solde_de_tout_compte_${who}_${new Date().toISOString().slice(0, 10)}.${ext}`;
+}
+async function exportSoldeXlsx(form: SoldeForm) {
+  if (!computeSolde(form).ok) { alert("Renseignez au moins la date d'embauche et la date de départ avant d'exporter."); return; }
+  downloadBlob(soldeFilename(form, 'xlsx'), buildSoldeXlsx(form, await loadLogoAsset()));
+}
+function exportSoldeCsv(form: SoldeForm) {
+  const csv = soldeCsvLines(form).map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+  downloadTextFile(soldeFilename(form, 'csv'), '﻿' + csv, 'text/csv;charset=utf-8');
+}
+
+// Champ modifiable dans la feuille : à l'écran un <input>, à l'impression le texte seul.
+const SHEET_TA = { left: 'text-left', center: 'text-center', right: 'text-right' } as const;
+const SHEET_JC = { left: 'justify-start', center: 'justify-center', right: 'justify-end' } as const;
+function SheetField({ type = 'text', value, onChange, display, align = 'right', width, placeholder }: {
+  type?: 'text' | 'date' | 'month' | 'number'; value: string | number; onChange: (v: string) => void;
+  display: string; align?: 'left' | 'center' | 'right'; width?: string; placeholder?: string;
+}) {
+  // Un champ « mois » vide affiche un masque (--------- ----) : on le masque tant qu'il n'a pas le focus.
+  const hideEmpty = type === 'month' && !value ? ' text-transparent focus:text-black' : '';
+  return (
+    <>
+      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} style={{ width: width || '100%' }}
+        className={'print:hidden bg-orange-50/70 border-b border-dashed border-orange-400 rounded-sm px-1 py-0 h-[20px] text-[13px] leading-none focus:outline-none focus:bg-orange-100 ' + SHEET_TA[align] + hideEmpty} />
+      <span className={'hidden print:flex ' + SHEET_JC[align]}>{display}</span>
+    </>
+  );
+}
+
+function SoldeToutComptePage({ filtered }: { filtered: Employee[] }) {
+  const [employeeId, setEmployeeId] = useState('');
+  const [form, setForm] = useState<SoldeForm>(emptyForm());
+  const [savedAt, setSavedAt] = useState('');
+  const dirty = useRef(false);
+  const calc = useMemo(() => computeSolde(form), [form]);
+  const selectedEmp = filtered.find(e => e.id === employeeId) || null;
+
+  useEffect(() => { currentSolde = form; }, [form]);
+
+  // Enregistrement automatique (un document par employé) — 0,8 s après la dernière frappe.
+  useEffect(() => {
+    if (!dirty.current || !employeeId) return;
+    const t = setTimeout(() => {
+      const rec: SoldeRecord = { ...form, id: employeeId, employeeId, updatedAt: new Date().toISOString() };
+      const i = soldes.findIndex(s => s.id === employeeId);
+      if (i >= 0) soldes[i] = rec; else soldes.push(rec);
+      persistDoc('soldes', employeeId, rec);
+      dirty.current = false;
+      setSavedAt(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [form, employeeId]);
+
+  const patch = (p: Partial<SoldeForm>) => { dirty.current = true; setForm(f => ({ ...f, ...p })); };
+  const patchMois = (i: number, p: Partial<SoldeForm['mois'][number]>) => {
+    dirty.current = true;
+    setForm(f => ({ ...f, mois: f.mois.map((m, k) => (k === i ? { ...m, ...p } : m)) }));
+  };
+
+  function pickEmployee(id: string) {
+    dirty.current = false;
+    setEmployeeId(id);
+    setSavedAt('');
+    const emp = filtered.find(e => e.id === id);
+    if (!emp) { setForm(emptyForm()); return; }
+    const saved = soldes.find(s => s.id === id);
+    if (saved) { setForm({ ...emptyForm(), ...saved, mois: [...saved.mois, ...emptyMois()].slice(0, MOIS_ROWS) }); return; }
+    setForm({
+      ...emptyForm(),
+      title: `${emp.gender === 'Femme' ? 'Mme' : 'M'} ${(emp.lastName || '').toUpperCase()} ${(emp.firstName || '').toUpperCase()}`.trim(),
+      dateEmbauche: emp.startDate || '',
+      salaireBase: getComponents(emp).baseSalary,
+    });
+  }
+
+  // Salaires bruts des 5 derniers mois, repris des bulletins calculés par « Paie »
+  // (mois complets, avec les jours payés / heures sup saisis) — à ajuster pour les mois partiels.
+  function prefillSalaires() {
+    if (!selectedEmp) { alert("Choisissez d'abord un employé."); return; }
+    if (!calc.ok) { alert("Renseignez d'abord la date d'embauche et la date de départ."); return; }
+    if (form.mois.some(m => m.ym || m.brut) && !confirm('Remplacer les salaires déjà saisis ?')) return;
+    const [dy, dm] = form.dateDepart.split('-').map(Number);
+    const floorYm = (calc.dateRetour || form.dateEmbauche).slice(0, 7);
+    const rows: SoldeForm['mois'] = [];
+    for (let k = 4; k >= 0; k--) {
+      const d = new Date(dy, dm - 1 - k, 1);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (ym < floorYm) continue;
+      const r = monthRange(d.getFullYear(), d.getMonth() + 1);
+      rows.push({ ym, brut: computeEmployeePayrollForPeriod(selectedEmp, r.start, r.end).social.totalBrut });
+    }
+    patch({ mois: [...rows, ...emptyMois()].slice(0, MOIS_ROWS) });
+  }
+
+  const ink = 'text-[13px] leading-[21px] whitespace-nowrap';
+  const G = { display: 'grid', gridTemplateColumns: '24.1fr 17.4fr 17.8fr 15.9fr 14.4fr 10.8fr', alignItems: 'center', minHeight: 21 } as const;
+  const col = (c: number, span = 1) => ({ gridColumn: `${c} / span ${span}` });
+  const Spacer = ({ h = 21 }: { h?: number }) => <div style={{ height: h }} />;
+  const num = (v: string) => Math.max(0, Number(v) || 0);
+
+  return (
+    <div className="space-y-5">
+      {/* Barre d'outils (non imprimée) */}
+      <div className="print:hidden bg-white rounded-2xl border border-slate-100 shadow-sm p-5 space-y-4">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <label className="text-xs font-semibold text-slate-600">Employé concerné</label>
+            <select value={employeeId} onChange={e => pickEmployee(e.target.value)}
+              className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300">
+              <option value="">— Saisie libre —</option>
+              {filtered.map(e => <option key={e.id} value={e.id}>{e.lastName} {e.firstName} — {e.position}</option>)}
+            </select>
+            <p className="text-[10px] text-slate-400">
+              {employeeId ? (savedAt ? `Brouillon enregistré à ${savedAt}.` : 'Le brouillon de cet employé est enregistré automatiquement.') : 'Sans employé choisi, rien n\'est enregistré (utilisez l\'export ou l\'impression).'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-end gap-2 sm:justify-end">
+            <button onClick={prefillSalaires}
+              className="px-3.5 py-2.5 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-colors">
+              Reprendre les salaires depuis « Paie »
+            </button>
+            <button onClick={() => exportSoldeXlsx(form)}
+              className="px-3.5 py-2.5 text-xs font-bold bg-orange-500 hover:bg-orange-600 text-white rounded-xl transition-colors shadow-sm shadow-orange-200">
+              Exporter en Excel (modèle)
+            </button>
+            <button onClick={() => window.print()}
+              className="px-3.5 py-2.5 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-colors">
+              Imprimer
+            </button>
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-4 pt-3 border-t border-slate-100">
+          <NumField label="Salaire de base retenu (gratification)" value={form.salaireBase} onChange={v => patch({ salaireBase: num(String(v)) })}
+            hint="Entre dans la formule : salaire de base × 75 % × jours de présence / 365." />
+          <NumField label="Congé payé déjà versé (comparaison)" value={form.refConge} onChange={v => patch({ refConge: num(String(v)) })}
+            hint="Optionnel — affiche l'écart à droite du congé payé (comme dans le modèle)." />
+          <NumField label="Gratification déjà versée (comparaison)" value={form.refGratif} onChange={v => patch({ refGratif: num(String(v)) })}
+            hint="Optionnel — affiche l'écart à droite de la gratification." />
+        </div>
+        <p className="text-[11px] text-slate-400">Les champs <span className="px-1 border-b border-dashed border-orange-400 bg-orange-50/70">pointillés orange</span> du document ci-dessous sont modifiables ; le reste se calcule tout seul.</p>
+      </div>
+
+      {/* Feuille — modèle « Solde de tout compte » */}
+      <div data-solde-sheet className="mx-auto w-full max-w-[740px] bg-white rounded-2xl border border-slate-100 shadow-sm p-8 print:max-w-none print:shadow-none print:border-0 print:rounded-none print:p-0 print:[zoom:0.8]"
+        style={{ fontFamily: "'Comic Sans MS','Comic Neue','Chalkboard SE',ui-rounded,sans-serif", color: '#000' }}>
+        <img src={logo} alt="I.P & D" style={{ height: 104, width: 'auto' }} className="mb-3" />
+
+        <div style={G} className={ink}>
+          <div style={col(1, 6)} className="text-center font-bold underline text-[14.5px]">
+            <div className="flex items-center justify-center gap-1">
+              <span>SOLDE DE TOUT COMPTE :</span>
+              <span className="print:hidden"><SheetField value={form.title} onChange={v => patch({ title: v.toUpperCase() })} display="" align="left" width="230px" /></span>
+              <span className="hidden print:inline">{form.title}</span>
+            </div>
+          </div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div style={G}><div style={col(1, 2)}>Date d'embauche</div>
+            <div style={col(3)}><SheetField type="date" value={form.dateEmbauche} onChange={v => patch({ dateEmbauche: v })} display={fmtDate(form.dateEmbauche)} /></div></div>
+          <div style={G}><div style={col(1, 2)}>Date de retour de dernier congé</div>
+            <div style={col(3)}><SheetField type="date" value={form.dateRetourConge || form.dateEmbauche} onChange={v => patch({ dateRetourConge: v === form.dateEmbauche ? '' : v })} display={fmtDate(calc.dateRetour)} /></div></div>
+          <div style={G}><div style={col(1, 2)}>Date de départ</div>
+            <div style={col(3)}><SheetField type="date" value={form.dateDepart} onChange={v => patch({ dateDepart: v })} display={fmtDate(form.dateDepart)} /></div></div>
+          <div style={G}><div style={col(1, 2)}>Ancienneté (en mois)</div><div style={col(3)} className="text-right px-1">{calc.ok ? fmtInt(calc.ancMois) : ''}</div></div>
+          <div style={G}><div style={col(1, 2)}>Ancienneté (en année)</div><div style={col(3)} className="text-right px-1">{calc.ok ? fmtDec1(calc.ancAn) : ''}</div></div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div className="font-bold underline">1-Détermination de l'allocation congé</div>
+          <div className="font-bold">a) Période de référence</div>
+          <Spacer h={7} />
+          <div style={G}><div style={col(1, 3)}>Date  de retour du dernier congé </div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtDate(calc.dateRetour) : ''}</div></div>
+          <Spacer h={7} />
+          <div style={G}><div style={col(1, 3)}>Date de départ en congé</div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtDate(form.dateDepart) : ''}</div></div>
+          <Spacer h={7} />
+          <div style={G}><div style={col(1, 3)}>Période de référence </div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtInt(calc.periodeRef) : ''}</div></div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div className="font-bold">{calc.methodeLabel}</div>
+          <Spacer h={7} />
+          <div style={G}>
+            <div style={{ ...col(2), borderTop: '1px solid #000', borderLeft: '1px solid #000', borderBottom: '1px solid #000' }} className="text-center font-bold">Période </div>
+            <div style={{ ...col(3), border: '1px solid #000' }} className="text-center font-bold">Salaire brut</div>
+          </div>
+          {form.mois.map((m, i) => (
+            <div key={i} style={G}>
+              <div style={{ ...col(2), borderLeft: '1px solid #000', minHeight: 21 }} className="px-1"><SheetField type="month" align="center" value={m.ym} onChange={v => patchMois(i, { ym: v })} display={fmtMonth(m.ym)} /></div>
+              <div style={{ ...col(3), borderLeft: '1px solid #000', borderRight: '1px solid #000', minHeight: 21 }} className="px-1">
+                <SheetField type="number" value={m.brut || ''} onChange={v => patchMois(i, { brut: num(v) })} display={m.brut ? fmtInt(m.brut) : ''} /></div>
+            </div>
+          ))}
+          <div style={G} className="font-bold text-[14px]">
+            <div style={{ ...col(2), border: '1px solid #000' }} className="text-center">TOTAL</div>
+            <div style={{ ...col(3), border: '1px solid #000' }} className="text-right px-2">{fmtInt(calc.total)}</div>
+          </div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div style={G}><div style={col(1, 2)}>Salaire Moyen Mensuel</div><div style={col(3)} className="text-right px-1">{calc.nbMois ? fmtInt(calc.moyMensuel) : ''}</div></div>
+          <div style={G}><div style={col(1, 2)}>Salaire moyen journalier</div><div style={col(3)} className="text-right px-1">{calc.nbMois ? fmtInt(calc.moyJour) : ''}</div></div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div className="font-bold">c) Détermination du nombre de jours de congé acquis</div>
+          <Spacer h={7} />
+          <div style={G}><div style={col(1, 3)}>Nombre de jours ouvrables</div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtInt(calc.joursOuvrables) : ''}</div></div>
+          <div style={G}><div style={col(1, 3)}>Période calendaire (jours de congé acquis)</div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtInt(calc.joursCalendaires) : ''}</div></div>
+          <div style={G}><div style={col(1, 3)}>Permission à déduire de congé</div>
+            <div style={col(4)}><SheetField type="number" value={form.permission || ''} onChange={v => patch({ permission: num(v) })} display={String(form.permission || 0)} placeholder="0" /></div></div>
+          <div style={G}><div style={col(1, 3)}>Période calendaire (jours de congé net acquis)</div><div style={col(4)} className="text-right px-1">{calc.ok ? fmtInt(calc.joursNets) : ''}</div></div>
+        </div>
+        <Spacer />
+
+        <div className={ink}>
+          <div className="font-bold">d) Détermination de l'indemnité de congé payé</div>
+          <Spacer h={7} />
+          <div style={G} className="font-bold">
+            <div style={col(1, 3)}>Congé payé</div>
+            <div style={col(4)} className="text-right px-1">{calc.ok && calc.nbMois ? fmtInt(calc.congePaye) : ''}</div>
+            <div style={col(5)} className="text-right px-1 font-normal">{calc.ecartConge !== null && calc.ok && calc.nbMois ? fmtInt(calc.ecartConge) : ''}</div>
+          </div>
+        </div>
+
+        {/* Page 2 du modèle : la gratification commence sur une nouvelle feuille */}
+        <div className={ink} style={{ breakBefore: 'page', paddingTop: 21 }}>
+          <div className="font-bold">2-Détermination de la gratification</div>
+          <div>{calc.gratifLabel}</div>
+          <div style={G}><div style={col(1, 2)}>Année de la gratification</div>
+            <div style={col(3)}><SheetField type="date" align="left" value={form.anneeGratif || calc.dateRetour} onChange={v => patch({ anneeGratif: v === calc.dateRetour ? '' : v })} display={fmtDate(calc.anneeGratifDate)} /></div></div>
+          <div style={G}><div style={col(1, 2)}>Nombre de jours de présence de gratification</div><div style={col(3)} className="text-right px-1">{calc.ok ? calc.joursPresence : ''}</div></div>
+          <div style={G}><div style={col(1)}>Gratification:</div>
+            <div style={col(2)} className="text-right px-1">{calc.ok && form.salaireBase > 0 ? fmtInt(calc.gratification) : ''}</div>
+            <div style={col(3)} className="text-right px-1">{calc.ecartGratif !== null && calc.ok && form.salaireBase > 0 ? fmtInt(calc.ecartGratif) : ''}</div></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LivreFinAnneePage({ filtered }: { filtered: Employee[] }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
@@ -3012,6 +3275,8 @@ async function loadAllFromFirestore() {
     loadCollectionInto('employees', employees, employees.slice()),
     loadCollectionInto('payrollOverrides', payrollOverrides, payrollOverrides.slice()),
     loadCollectionInto('sites', sites, sites.slice()),
+    // Brouillons « Solde de tout compte » : ne doit jamais empêcher le démarrage de l'application
+    loadCollectionInto('soldes', soldes, []).catch(err => console.warn('Collection « soldes » indisponible :', err)),
     loadUsersCollection(registeredUsers),
   ]);
 }
@@ -3141,6 +3406,7 @@ function AppShell() {
     paye: 'Paie & Salaires',
     'livre-fin-annee': "Livre de paie — Fin d'année",
     reconstitution: 'Reconstitution du salaire de base',
+    'solde-tout-compte': 'Solde de tout compte',
     'cs-mensuelles': 'Charges sociales mensuelles',
     'cs-semestrielles': 'Charges sociales semestrielles',
     'cs-annuelles': 'Charges sociales annuelles',
@@ -3190,6 +3456,11 @@ function AppShell() {
   };
 
   const exportPage = async (format: 'xlsx' | 'csv') => {
+    if (page === 'solde-tout-compte') {   // document unique : l'export est le modèle Excel lui-même
+      if (!currentSolde) { alert('Rien à exporter sur cette page.'); return; }
+      if (format === 'xlsx') await exportSoldeXlsx(currentSolde); else exportSoldeCsv(currentSolde);
+      return;
+    }
     const title = titles[page] || 'Export';
     const tables = getExportTables().filter(t => t.headers.length > 0);
     if (tables.length === 0) { alert('Rien à exporter sur cette page.'); return; }
@@ -3287,6 +3558,7 @@ function AppShell() {
           <div data-page="paye" style={{ display: page === 'paye' ? 'block' : 'none' }}><PageErrorBoundary pageName="Paie"><PayePage filtered={filtered} /></PageErrorBoundary></div>
           <div data-page="livre-fin-annee" style={{ display: page === 'livre-fin-annee' ? 'block' : 'none' }}><PageErrorBoundary pageName="Livre de paie — Fin d'année"><LivreFinAnneePage filtered={filtered} /></PageErrorBoundary></div>
           <div data-page="reconstitution" style={{ display: page === 'reconstitution' ? 'block' : 'none' }}><PageErrorBoundary pageName="Reconstitution"><ReconstitutionPage filtered={filtered} /></PageErrorBoundary></div>
+          <div data-page="solde-tout-compte" style={{ display: page === 'solde-tout-compte' ? 'block' : 'none' }}><PageErrorBoundary pageName="Solde de tout compte"><SoldeToutComptePage filtered={filtered} /></PageErrorBoundary></div>
           <div data-page="cs-mensuelles" style={{ display: page === 'cs-mensuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales mensuelles"><SocialChargesPage filtered={filtered} mode="month" periodLabel="Mensuelles" /></PageErrorBoundary></div>
           <div data-page="cs-semestrielles" style={{ display: page === 'cs-semestrielles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales semestrielles"><SocialChargesPage filtered={filtered} mode="semester" periodLabel="Semestrielles" /></PageErrorBoundary></div>
           <div data-page="cs-annuelles" style={{ display: page === 'cs-annuelles' ? 'block' : 'none' }}><PageErrorBoundary pageName="Charges sociales annuelles"><SocialChargesPage filtered={filtered} mode="year" periodLabel="Annuelles" /></PageErrorBoundary></div>

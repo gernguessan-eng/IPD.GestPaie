@@ -220,7 +220,7 @@ function crc32(data: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function zipStore(files: { name: string; data: Uint8Array }[]): Uint8Array {
+export function zipStore(files: { name: string; data: Uint8Array }[]): Uint8Array {
   const now = new Date();
   const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
   const dosDate = (Math.max(now.getFullYear() - 1980, 0) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
